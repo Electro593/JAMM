@@ -53,11 +53,11 @@ make_module_uri :: (options: Import_Options) -> string {
 	valid, message := validate_uri(host);
 	assert(valid, message);
 
-	vendor := encode_for_uri(options.vendor);
+	vendor := encode_uri_path_segment(options.vendor, allow_wobbly = true);
 	defer free(vendor);
 	assert(vendor);
 
-	name := encode_for_uri(options.name);
+	name := encode_uri_path_segment(options.name, allow_wobbly = true);
 	defer free(name);
 	assert(name);
 
@@ -69,7 +69,7 @@ make_module_uri :: (options: Import_Options) -> string {
 	init_string_builder(*builder);
 
 	if host print_to_builder(*builder, "jamm-%", host);
-	else print_to_builder(*builder, "jamm://");
+	else print_to_builder(*builder, "jamm:");
 
 	print_to_builder(*builder, "/%/%", vendor, name);
 	print_to_builder(*builder, "/%.%.%", version.major, version.minor, version.patch);
@@ -142,6 +142,9 @@ JAMM_Plugin :: struct {
 	}
 
 	compatibility_options: struct {
+		// Allows surrogate halves in your utf8 strings. But why?
+		allow_wobbly_utf8: bool;
+
 		// Don't tell the intercept to skip expressions without notes
 		do_not_skip_expressions_without_notes: bool;
 	}
@@ -410,6 +413,8 @@ jamm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) 
 	}
 
     if consume(*key, "compatibility.") {
+		if key == "allow_wobbly_utf8" {
+			plugin.options.compatibility_options.allow_wobbly_utf8 = bool_option();
         if key == "do_not_skip_expressions_without_notes" {
             plugin.options.compatibility_options.do_not_skip_expressions_without_notes = bool_option();
         } else {
@@ -458,28 +463,150 @@ jamm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) 
 	return true;
 }
 
-encode_for_uri :: (value: string) -> string {
-	
+encode_uri_path_segment :: (value: string, allow_wobbly := false, is_first_segment_in_relative_uri := false) -> string {
+	HEX_MAP :: "0123456789ABCDEF";
+
+	_utf8: [4] u8;
+	utf8 := string.{ utf8.data, utf8.count };
+
+	buffer: [..] u8;
+	array_reserve(*buffer, value.count);
+
+	i := 0;
+	while i < value.count {
+		codepoint, to_advance := read_utf32_codepoint(advance(value, i), allow_wobbly);
+		i += to_advance;
+
+		success, length := write_utf32_codepoint(codepoint, utf8, allow_wobbly);
+		assert(success);
+
+		for 0 .. length - 1 {
+			if !is_alnum(char) {
+				if xx char == {
+				case #char "!";
+				case #char "$";
+				case #char "&";
+				case #char "'";
+				case #char "(";
+				case #char ")";
+				case #char "*";
+				case #char "+";
+				case #char ",";
+				case #char "-";
+				case #char ".";
+				case #char ";";
+				case #char "=";
+				case #char "@";
+				case #char "~";
+				case #char ":"; if is_first_segment_in_relative_uri #through;
+				case;
+					array_add(*buffer, #char "%", HEX_MAP[it >> 4], HEX_MAP[it & 0xF]);
+					continue;
+				}
+			}
+			array_add(*buffer, it);
+		}
+	}
+
+	return .{ buffer.data, buffer.count };
+}
+
+// The version in Unicode.jai doesn't handle errors correctly
+read_utf32_codepoint(s: string, allow_wobbly := false) -> (c: u32, to_advance: int) {
+	REPLACEMENT : u32 : 0x0000FFFD;
+
+	if s.count < 1 return 0, 0;
+	c0: u32 = s[0];
+
+	if c0 <= 0x7F return c0 & 0x7F, 1;
+
+	if c0 <= 0xBF return REPLACEMENT, 1; // Lone continuation byte
+	if (c0 & 0xFE) == 0xC0 return REPLACEMENT, 1; // Overlong 2-byte
+	if c0 > 0xF4 return REPLACEMENT, 1; // Too large
+
+	if s.count < 2 return REPLACEMENT, 1; // Not enough bytes
+	c1: u32 = s[1];
+	if (c1 & 0xC0) != 0x80 return REPLACEMENT, 1; // Not a continuation byte
+
+	if c0 <= 0xDF return (c0 & 0x1F) << 6 | (c1 & 0x3F), 2;
+
+	if c0 == 0xE0 && (c1 & 0x20) == 0 return REPLACEMENT, 1; // Overlong 3-byte
+	if !allow_wobbly && c0 == 0xED && c1 > 0x9F return REPLACEMENT, 1; // Surrogate half
+	if c0 == 0xF0 && (c1 & 0xB0) == 0 return REPLACEMENT, 1; // Overlong 4-byte
+	if c0 == 0xF4 && c1 > 0x8F return REPLACEMENT, 1; // Too large
+
+	if s.count < 3 return REPLACEMENT, 2; // Not enough bytes
+	c2: u32 = s[2];
+	if (c2 & 0xC0) != 0x80 return REPLACEMENT, 2; // Not a continuation byte
+
+	if c0 <= 0xEF return (c0 & 0x0F) << 12 | (c1 & 0x3F) << 6 | (c2 & 0x3F), 3;
+
+	if s.count < 4 return REPLACEMENT, 3; // Not enough bytes
+	c3: u32 = s[3];
+	if (c3 & 0xC0) != 0x80 return REPLACEMENT, 3; // Not a continuation byte
+
+	return (c0 & 0x07) << 18 | (c1 & 0x3F) << 12 | (c2 & 0x3F) << 6 | (c3 & 0x3F), 4;
+}
+
+// Assumes host endianness
+write_utf32_codepoint :: (s: string, c: u32, allow_wobbly := false) -> (success: bool, count: int) {
+	REPLACEMENT : u32 : 0x0000FFFD;
+
+	if c <= 0x7F {
+		if s.count < 1 return false, 1;
+		s[0] = c;
+		return true, 1;
+	}
+
+	if c <= 0x7FF {
+		if s.count < 2 return false, 2;
+		s[0] = 0xC0 | ((c >> 6) & 0x1F);
+		s[1] = 0x80 | (c & 0x3F);
+		return true, 2;
+	}
+
+	if !allow_wobbly && c >= 0xD800 && c <= 0xDFFF then c = REPLACEMENT;
+	if c > 0x10FFFF then c = REPLACEMENT;
+
+	if c <= 0xFFFF {
+		if s.count < 3 return false, 3;
+		s[0] = 0xE0 | ((c >> 12) & 0x0F);
+		s[1] = 0x80 | ((c >> 6) & 0x3F);
+		s[2] = 0x80 | (c & 0x3F);
+		return true, 3;
+	}
+
+	if s.count < 4 return false, 4;
+	s[0] = 0xF0 | ((c >> 18) & 0x07);
+	s[1] = 0x80 | ((c >> 12) & 0x3F);
+	s[2] = 0x80 | ((c >> 6) & 0x3F);
+	s[3] = 0x80 | (c & 0x3F);
+	return true, 4;
 }
 
 validate_uri :: (value: string) -> (valid: bool, message: string) {
-
+	// TODO
+	return false, "";
 }
 
 validate_ssh_ref :: (value: string) -> (valid: bool, message: string) {
-
+	// TODO
+	return false, "";
 }
 
 validate_dir :: (value: string) -> (valid: bool, message: string) {
-
+	// TODO
+	return false, "";
 }
 
 validate_version :: (value: Version) -> (valid: bool, message: string) {
-
+	// TODO
+	return false, "";
 }
 
 validate_version_constraint :: (value: Version_Constraint) -> (valid: bool, message: string) {
-
+	// TODO
+	return false, "";
 }
 
 get_license_id :: (name: string) -> int {
