@@ -69,7 +69,7 @@ make_module_uri :: (options: Import_Options) -> string {
 	init_string_builder(*builder);
 
 	if host print_to_builder(*builder, "jamm-%", host);
-	else print_to_builder(*builder, "jamm:");
+	else print_to_builder(*builder, "jamm://");
 
 	print_to_builder(*builder, "/%/%", vendor, name);
 	print_to_builder(*builder, "/%.%.%", version.major, version.minor, version.patch);
@@ -94,14 +94,16 @@ get_plugin :: () -> *Metaprogram_Plugin {
 #scope_file
 
 plugin: JAMM_Plugin = .{
-	init               = jamm_init,
-	before_intercept   = jamm_before_intercept,
-	add_source         = jamm_add_source,
-	message            = jamm_message,
-	finish             = jamm_finish,
-	shutdown           = jamm_shutdown,
-	log_help           = jamm_log_help,
-	communication_proc = jamm_communication_proc
+	base = .{
+		init               = jamm_init,
+		before_intercept   = jamm_before_intercept,
+		add_source         = jamm_add_source,
+		message            = jamm_message,
+		finish             = jamm_finish,
+		shutdown           = jamm_shutdown,
+		log_help           = jamm_log_help,
+		communication_proc = jamm_communication_proc
+	}
 };
 
 JAMM_Module :: struct {
@@ -234,7 +236,7 @@ jamm_init :: (p: *Metaprogram_Plugin, options: [] string) -> bool {
 		case .NEXT_COMMAND;
 			if options[cursor] == {
 			case "publish";
-				plugin.options.publish = true;
+				plugin.publish = true;
 				parse_mode = .PUBLISH;
 				cursor += 1;
 
@@ -248,12 +250,12 @@ jamm_init :: (p: *Metaprogram_Plugin, options: [] string) -> bool {
 			if options[cursor] == {
 			case "-host";
 				ensure_options(2, "must be followed by a host URI");
-				plugin.options.publish.host = uri_option(options[cursor + 1]);
+				plugin.publish_options.host = uri_option(options[cursor + 1]);
 				cursor += 2;
 
 			case "-ssh";
 				ensure_options(2, "must be followed by an SSH key reference");
-				plugin.options.publish.ssh_key = ssh_ref_option(options[cursor + 1]);
+				plugin.publish_options.ssh_key = ssh_ref_option(options[cursor + 1]);
 				cursor += 2;
 
 			case; command_or_invalid();
@@ -271,23 +273,17 @@ jamm_before_intercept :: (p: *Metaprogram_Plugin, flags: *Intercept_Flags) {
 
 	// TODO: Add sensible defaults for store and publish host
 
-	if plugin.options.help {
-		if #complete plugin.options.command_kind == {
-		case .NONE; log(HELP_STRING);
-		case .PUBLISH; log(PUBLISH_HELP_STRING);
-		}
+	if plugin.options.print_help {
+		if plugin.publish log(PUBLISH_HELP_STRING);
+		else log(HELP_STRING);
 		exit(0);
 	}
 
-	if #complete plugin.options.command_kind == {
-	case .NONE;
-
-	case .PUBLISH;
-		*Intercept_Flags &= ~.SKIP_DECLARATIONS;
-		if !plugin.options.compatibility_do_not_skip_expressions_without_notes
-			*Intercept_Flags |= .SKIP_EXPRESSIONS_WITHOUT_NOTES;
+	if plugin.publish {
+		flags.* &= ~.SKIP_DECLARATIONS;
+		if !plugin.compatibility_options.do_not_skip_expressions_without_notes
+			flags.* |= .SKIP_EXPRESSIONS_WITHOUT_NOTES;
 	}
-
 }
 
 jamm_add_source :: (p: *Metaprogram_Plugin) {
@@ -370,7 +366,7 @@ jamm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) 
 	plugin: *JAMM_Plugin = xx p;
 
     consume :: (key: *string, prefix: string) -> bool {
-        if begins_with(key, prefix) {
+        if begins_with_nocase(key.*, prefix) {
             advance(key, prefix.count);
             return true;
         }
@@ -391,8 +387,8 @@ jamm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) 
 		invalid_key("JAMM cannot be configured once it has begun executing");
 
 	bool_option :: (value: string) -> bool #expand {
-		if equals_nocase(value, "true") return true;
-		if equals_nocase(value, "false") return false;
+		if equal_nocase(value, "true") return true;
+		if equal_nocase(value, "false") return false;
 		invalid_value("must be 'true' or 'false'");
 	}
 
@@ -415,25 +411,23 @@ jamm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) 
 	}
 
     if consume(*key, "compatibility.") {
-		if key == "allow_wobbly_utf8" {
-			plugin.options.compatibility_options.allow_wobbly_utf8 = bool_option();
-        if key == "do_not_skip_expressions_without_notes" {
-            plugin.options.compatibility_options.do_not_skip_expressions_without_notes = bool_option();
+		if equal_nocase(key, "allow_wobbly_utf8") {
+			plugin.compatibility_options.allow_wobbly_utf8 = bool_option(value);
+        } else if equal_nocase(key, "do_not_skip_expressions_without_notes") {
+            plugin.compatibility_options.do_not_skip_expressions_without_notes = bool_option(value);
         } else {
             invalid_key();
         }
     } else if consume(*key, "publish.") {
-        if key == "host" {
+        if equal_nocase(key, "host") {
             plugin.publish_options.host = uri_option(value);
-        } else if key == "ssh" {
+        } else if equal_nocase(key, "ssh") {
             plugin.publish_options.ssh_key = ssh_ref_option(value);
         } else {
             invalid_key();
         }
     } else {
-    	if key == "help" {
-    		plugin.options.print_help = bool_option(value)
-    	} else if consume(*key, "host.") {
+    	if consume(*key, "host.") {
             host_to := uri_option(value);
             defer free(host_to);
             host_from := uri_option(key);
@@ -455,7 +449,7 @@ jamm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) 
                 free(entry.*);
             }
             entry.* = copy_string(ssh_key);
-        } else if key == "store" {
+        } else if equal_nocase(key, "store") {
             plugin.options.store = dir_option(value);
         } else {
             invalid_key();
@@ -465,8 +459,14 @@ jamm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) 
 	return true;
 }
 
-encode_uri_path_segment :: (value: string, allow_wobbly := false, is_first_segment_in_relative_uri := false) -> string {
+encode_uri_path_segment :: (
+	value: string,
+	allow_wobbly := false,
+	should_encode_delim: (char: u8) -> bool = null
+) -> string {
 	HEX_MAP :: "0123456789ABCDEF";
+
+	// TODO: scheme-aware should_encode_delim
 
 	_utf8: [4] u8;
 	utf8 := string.{ utf8.data, utf8.count };
@@ -482,31 +482,38 @@ encode_uri_path_segment :: (value: string, allow_wobbly := false, is_first_segme
 		success, length := write_utf32_codepoint(codepoint, utf8, allow_wobbly);
 		assert(success);
 
-		for 0 .. length - 1 {
-			if !is_alnum(char) {
-				if xx char == {
-				case #char "!";
-				case #char "$";
-				case #char "&";
-				case #char "'";
-				case #char "(";
-				case #char ")";
-				case #char "*";
-				case #char "+";
-				case #char ",";
-				case #char "-";
-				case #char ".";
-				case #char ";";
-				case #char "=";
-				case #char "@";
-				case #char "~";
-				case #char ":"; if is_first_segment_in_relative_uri #through;
-				case;
-					array_add(*buffer, #char "%", HEX_MAP[it >> 4], HEX_MAP[it & 0xF]);
+		for utf8 {
+			if is_alnum(it) || it == #char "-" || it == #char "." || it == #char "~" {
+				array_add(*buffer, it);
+				continue;
+			}
+
+			if it == {
+			case #char "!"; #through;
+			case #char "#"; #through;
+			case #char "$"; #through;
+			case #char "&"; #through;
+			case #char "'"; #through;
+			case #char "("; #through;
+			case #char ")"; #through;
+			case #char "*"; #through;
+			case #char "+"; #through;
+			case #char ","; #through;
+			case #char "/"; #through;
+			case #char ":"; #through;
+			case #char ";"; #through;
+			case #char "="; #through;
+			case #char "?"; #through;
+			case #char "@"; #through;
+			case #char "["; #through;
+			case #char "]";
+				if should_encode_delim && !should_encode_delim(it) {
+					array_add(*buffer, it);
 					continue;
 				}
 			}
-			array_add(*buffer, it);
+
+			array_add(*buffer, #char "%", HEX_MAP[it >> 4], HEX_MAP[it & 0xF]);
 		}
 	}
 
@@ -514,7 +521,7 @@ encode_uri_path_segment :: (value: string, allow_wobbly := false, is_first_segme
 }
 
 // The version in Unicode.jai doesn't handle errors correctly
-read_utf32_codepoint(s: string, allow_wobbly := false) -> (c: u32, to_advance: int) {
+read_utf32_codepoint :: (s: string, allow_wobbly := false) -> (c: u32, to_advance: int) {
 	REPLACEMENT : u32 : 0x0000FFFD;
 
 	if s.count < 1 return 0, 0;
@@ -586,17 +593,18 @@ write_utf32_codepoint :: (s: string, c: u32, allow_wobbly := false) -> (success:
 	return true, 4;
 }
 
-validate_uri :: (value: string) -> (valid: bool, message: string) {
+validate_uri :: (value: string) -> (valid: bool, message := "") {
 	if !value return true;
 
-	// TODO
+	// TODO: Implement uri validation
+
 	return false, "";
 }
 
-validate_ssh_ref :: (value: string) -> (valid: bool, message: string) {
+validate_ssh_ref :: (value: string) -> (valid: bool, message := "") {
 	if !value return true;
 
-	PATH_SEPARATOR :: #if OS == .WINDOWS then "\\" else "/";
+	PATH_SEPARATOR :: #ifx OS == .WINDOWS then "\\" else "/";
 
 	is_path := contains(value, "/");
 	#if OS == .WINDOWS then is_path |= contains(value, "\\");
@@ -631,9 +639,9 @@ validate_ssh_ref :: (value: string) -> (valid: bool, message: string) {
 
 	path := builder_to_string(*builder);
 	defer free(path);
-	
+
 	if !file_exists(path)
-		return tprint("was not able to be found or opened at '%'", path);
+		return false, tprint("was not able to be found or opened at '%'", path);
 
 	return true;
 }
@@ -719,7 +727,8 @@ HELP_STRING :: #string DONE
 Resolve JAMM imports in the target program.
 
 Options
-	-help			Print this help message, or that of the command.
+	-help			Print this help message, or that of the first following
+					command.
 	-host FROM TO	Override the given FROM host URI to the given TO host URI.
 	-ssh URI KEY	Override the default SSH agent with a specific key for a
 					given host URI. See `+JAMM -help publish` for URI and KEY
