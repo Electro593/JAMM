@@ -587,18 +587,66 @@ write_utf32_codepoint :: (s: string, c: u32, allow_wobbly := false) -> (success:
 }
 
 validate_uri :: (value: string) -> (valid: bool, message: string) {
+	if !value return true;
+
 	// TODO
 	return false, "";
 }
 
 validate_ssh_ref :: (value: string) -> (valid: bool, message: string) {
-	// TODO
-	return false, "";
+	if !value return true;
+
+	PATH_SEPARATOR :: #if OS == .WINDOWS then "\\" else "/";
+
+	is_path := contains(value, "/");
+	#if OS == .WINDOWS then is_path |= contains(value, "\\");
+	if is_path {
+		#if OS == .WINDOWS {
+			value := replace(value, "/", "\\");
+			defer free(value);
+		}
+
+		if !file_exists(value)
+			return false, "was not able to be opened";
+
+		return true;
+	}
+
+	home, success := get_home_directory();
+	if !success {
+		username:, success = get_username();
+		if success
+			home, success = get_home_directory(username);
+	}
+
+	if !success
+		return false, "was not able to find the user's home directory";
+
+	builder: String_Builder;
+	init_string_builder(*builder);
+
+	append(*builder, home);
+	if (home[home.count - 1] != PATH_SEPARATOR) append(*builder, PATH_SEPARATOR);
+	print_to_builder(*builder, ".ssh%%.pub", PATH_SEPARATOR, value);
+
+	path := builder_to_string(*builder);
+	defer free(path);
+	
+	if !file_exists(path)
+		return tprint("was not able to be found or opened at '%'", path);
+
+	return true;
 }
 
-validate_dir :: (value: string) -> (valid: bool, message: string) {
-	// TODO
-	return false, "";
+validate_dir :: (value: string) -> (valid: bool, message := "") {
+	if !value return true;
+
+	is_dir, success := is_directory(value);
+	if !success return false, "was not able to be opened";
+
+	if !is_dir return false, "is not a directory";
+
+	return true;
 }
 
 validate_version :: (using value: Version) -> (valid: bool, message: string) {
@@ -742,5 +790,7 @@ License :: enum {
 #import "Basic";
 #import "Compiler";
 #import "File";
+#import "File_Utilities";
 #import "Hash_Table";
 #import "String";
+#import "System";
