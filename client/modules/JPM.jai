@@ -21,43 +21,6 @@ Import_Options :: struct {
 	alias: string = "";
 }
 
-Options :: struct {
-	// If true, just print help and exit.
-	print_help: bool;
-
-	// Per-host uri overrides.
-	host_map: Table(string, string);
-
-	// Per-host SSH key overrides.
-	ssh_map: Table(string, string);
-
-	// Module store path override.
-	store: string;
-
-	// Compatibility options for interacting with other plugins
-	compatibility_do_not_skip_expressions_without_notes: bool;
-
-	Publish :: struct {
-		#as using base: Base;
-		command_kind = .PUBLISH;
-
-		// Target registry host override.
-		host: string;
-
-		// Target host SSH key override.
-		ssh_key: string;
-	}
-
-	Command_Kind :: enum {
-		NONE;
-		PUBLISH;
-	}
-
-	#as using command: union command_kind: Command_Kind = .NONE {
-		.PUBLISH ,, publish: Publish;
-	}
-}
-
 Version :: struct {
 	major: int;
 	minor: int;
@@ -428,7 +391,15 @@ jpm_log_help :: (p: *Metaprogram_Plugin) {
 jpm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -> bool {
 	plugin: *JPM_Plugin = xx p;
 
-	invalid_key :: (reason: string) #expand {
+    consume :: (key: *string, prefix: string) -> bool {
+        if begins_with(key, prefix) {
+            advance(key, prefix.count);
+            return true;
+        }
+        return false;
+    }
+
+	invalid_key :: (reason: string = "Unrecognized option") #expand {
 		log_error("Invalid JPM communication key '%': %\n", `key, reason);
 		`return false;
 	}
@@ -441,72 +412,72 @@ jpm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -
 	if plugin.stage >= .EXECUTING
 		invalid_key("JPM cannot be configured once it has begun executing");
 
-	bool_option :: () -> bool #expand {
-		if equals_nocase(`value, "true") return true;
-		if equals_nocase(`value, "false") return false;
+	bool_option :: (value: string) -> bool #expand {
+		if equals_nocase(value, "true") return true;
+		if equals_nocase(value, "false") return false;
 		invalid_value("is not a bool");
 	}
 
-	host_option :: () -> string #expand {
-		if validate_host(`value) return `value;
+	host_option :: (value: string) -> string #expand {
+		if validate_host(value) return copy_string(value);
 		invalid_value("is not a valid host registry URI");
 	}
 
-	key_option :: () -> string #expand {
-		if validate_key(`value) return `value;
+	key_option :: (value: string) -> string #expand {
+		if validate_key(value) return copy_string(value);
 		invalid_value("is not a valid SSH key reference");
 	}
 
-	dir_option :: () -> string #expand {
-		if validate_dir(`value) return `value;
+	dir_option :: (value: string) -> string #expand {
+		if validate_dir(value) return copy_string(value);
 		invalid_value("is not a valid directory");
 	}
 
-	if key == "help" {
-		plugin.options.print_help = bool_option()
-	} else if begins_with(key, "host.") {
-		advance(*key, "host.".count);
-		entry, added := find_or_add(*plugin.options.host_map, key);
-		if added then entry.key = copy_string(key);
-		else free(entry.value);
-		entry.value = copy_string(value);
-	}
+    if consume(*key, "compatibility.") {
+        if key == "do_not_skip_expressions_without_notes" {
+            plugin.options.compatibility_options.do_not_skip_expressions_without_notes = bool_option();
+        } else {
+            invalid_key();
+        }
+    } else if consume(*key, "publish.") {
+        if key == "host" {
+            plugin.publish_options.host = host_option(value);
+        } else if key == "ssh" {
+            plugin.publish_options.ssh_key = key_option(value);
+        } else {
+            invalid_key();
+        }
+    } else {
+    	if key == "help" {
+    		plugin.options.print_help = bool_option(value)
+    	} else if consume(*key, "host.") {
+            host_to := host_option(value);
+            defer free(host_to);
+            host_from := host_option(key);
 
-	if key == {
-	case "host.from";
-		if host_from invalid_key("a previous 'host.from' was provided without a following 'host.to'");
-		plugin.communication_proc.pending_host_from = host_option();
-	case "host.to";
-		plugin.communication_proc.pending_host_from = "";
-		if !host_from invalid_key("a value must be provided to 'host.from' first");
-		host_to, added := table_find_or_add(*plugin.options.host_map, host_from);
-		if !added {
-			free(host_from);
-			free(host_to.*);
-		}
-		host_to.* = host_option();
+    		entry, added := find_or_add(*plugin.options.host_map, host_from);
+    		if !added {
+                free(host_from);
+                free(entry.*);
+            }
+    		entry.* = copy_string(host_to);
+    	} else if consume(*key, "ssh.") {
+            ssh_key := key_option(value);
+            defer free(ssh_key);
+            ssh_host := host_option(key);
 
-	case "ssh.host";
-		if ssh_host invalid_key("a previous 'ssh.host' was provided without a following 'ssh.key'");
-		plugin.communication_proc.pending_ssh_host = key_option();
-	case "ssh.key";
-		plugin.communication_proc.pending_ssh_host = "";
-		if !ssh_host invalid_key("a value must be provided to 'ssh.host' first");
-		ssh_key, added := table_find_or_add(*plugin.options.ssh_map, ssh_host);
-		if !added {
-			free(ssh_host);
-			free(ssh_key.*);
-		}
-		ssh_key.* = key_option();
-
-	case "store";
-		if ssh_
-
-	case "compatibility.do_not_skip_expressions_without_notes";
-		plugin.options.compatibility_options.do_not_skip_expressions_without_notes = bool_option();
-
-	case; return false;
-	}
+            entry, added := find_or_add(*plugin.options.ssh_map, ssh_host);
+            if !added {
+                free(ssh_host);
+                free(entry.*);
+            }
+            entry.* = copy_string(ssh_key);
+        } else if key == "store" {
+            plugin.options.store = dir_option(value);
+        } else {
+            invalid_key();
+        }
+    }
 
 	return true;
 }
