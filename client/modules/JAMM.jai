@@ -14,40 +14,77 @@ Import_Options :: struct {
 	version: Version_Constraint;
 
 	host: string = "";
-	alias: string = "";
 }
 
 Version :: struct {
-	major: int;
-	minor: int;
-	patch: int;
+	major: u64;
+	minor: u64;
+	patch: u64;
+	pre_release: string;
+	build_metadata: string;
 }
 
 Version_Constraint :: struct {
-	major: int;
-	minor: int;
-	patch: int;
+	major: u64;
+	minor: u64;
+	patch: u64;
+	pre_release: string;
 
 	match: enum {
 		EXACT;
+		LATEST_PRE_RELEASE;
 		LATEST_PATCH;
 		LATEST_MINOR;
-		LATEST;
 	} = .EXACT;
 }
 
 import :: (options: Import_Options, $toplevel_scope := #caller_code) #expand {
-	make_import :: (using options: Import_Options) -> string {
-		// TODO: Make this actually a thing
-		path := sprint("/home/aria/programming/jai-json/modules/%", name);
-		defer free(path);
-		is_file := true;
-
-		if is_file return tprint("#import,file \"%.jai\";", path);
-		return tprint("#import,dir \"%/module.jai\";", path);
+	make_import :: (options: Import_Options) -> string {
+		uri := make_module_uri(options);
+		defer free(uri);
+		return tprint("#import,dir \"%\";", uri);
 	}
 
-	#insert,scope(toplevel_scope) #run make_import(options);
+	#insert,scope(toplevel_scope) #run make_module_uri(options);
+}
+
+make_module_uri :: (options: Import_Options) -> string {
+	host := options.host;
+	valid, message := validate_uri(host);
+	assert(valid, message);
+
+	vendor := encode_for_uri(options.vendor);
+	defer free(vendor);
+	assert(vendor);
+
+	name := encode_for_uri(options.name);
+	defer free(name);
+	assert(name);
+
+	version := options.version;
+	valid, message = validate_version(version);
+	assert(valid, message);
+
+	builder: String_Builder;
+	init_string_builder(*builder);
+
+	if host print_to_builder(*builder, "jamm-%", host);
+	else print_to_builder(*builder, "jamm://");
+
+	print_to_builder(*builder, "/%/%", vendor, name);
+	print_to_builder(*builder, "/%.%.%", version.major, version.minor, version.patch);
+
+	if version.pre_release
+		print_to_builder(*builder, "-%", version.pre_release);
+
+	if #complete version.match == {
+	case .EXACT;
+	case .LATEST_PRE_RELEASE; append(*builder, "?match=latest-pre-release");
+	case .LATEST_PATCH; append(*builder, "?match=latest-patch");
+	case .LATEST_MINOR; append(*builder, "?match=latest-minor");
+	}
+
+	return builder_to_string(*builder);
 }
 
 get_plugin :: () -> *Metaprogram_Plugin {
@@ -55,43 +92,6 @@ get_plugin :: () -> *Metaprogram_Plugin {
 }
 
 #scope_file
-
-print_node :: (node: *Code_Node, indent := 0) {
-	_spaces: [256] u8;
-	memset(_spaces.data, #char " ", _spaces.count);
-	spaces: string = .{ data = _spaces.data, count = _spaces.count };
-
-	print_node :: (node: *Code_Node, spaces: string, indent: int) {
-		if !node return;
-
-		space := spaces;
-		space.count = indent * 2;
-
-		if node.kind == {
-		case .IDENT; print("%%\n", space, (.*) cast(*Code_Ident) node);
-		case .LITERAL; print("%%\n", space, (.*) cast(*Code_Literal) node);
-		case .NOTE; print("%%\n", space, (.*) cast(*Code_Note) node);
-		case .DIRECTIVE_IMPORT; print("%%\n", space, (.*) cast(*Code_Directive_Import) node);
-		case .DECLARATION;
-			decl: *Code_Declaration = xx node;
-			print("%%\n", space, decl.*);
-			print_node(decl.expression, spaces, indent + 1);
-		case .PROCEDURE_HEADER;
-			header: *Code_Procedure_Header = xx node;
-			print("%%\n", space, header.*);
-			for header.arguments print_node(it, spaces, indent + 1);
-		case .PROCEDURE_CALL;
-			call: *Code_Procedure_Call = xx node;
-			print("%%\n", space, call.*);
-			print_node(call.resolved_procedure_expression, spaces, indent + 1);
-			for call.arguments_unsorted print_node(it.expression, spaces, indent + 1);
-		case;
-			print("%%\n", space, node.kind);
-		}
-	}
-
-	print_node(node, spaces, indent);
-}
 
 plugin: JAMM_Plugin = .{
 	init             = jamm_init,
@@ -169,6 +169,24 @@ jamm_init :: (p: *Metaprogram_Plugin, options: [] string) -> bool {
 			invalid_option(reason);
 	}
 
+	uri_option :: (value: string) -> string #expand {
+		valid, message := validate_uri(value);
+		if valid return value;
+		invalid_option(message);
+	}
+
+	ssh_ref_option :: (value: string) -> string #expand {
+		valid, message := validate_ssh_ref(value);
+		if valid return value;
+		invalid_option(message);
+	}
+
+	dir_option :: (value: string) -> string #expand {
+		valid, message := validate_dir(value);
+		if valid return value;
+		invalid_option(message);
+	}
+
 	parse_mode: enum {
 		NONE;
 		NEXT_COMMAND;
@@ -188,24 +206,21 @@ jamm_init :: (p: *Metaprogram_Plugin, options: [] string) -> bool {
 
 			case "-host";
 				ensure_options(3, "must be followed by an original host URI and a new host URI");
-				from: options[cursor + 1];
-				to: options[cursor + 2];
-				// TODO: Validate the uris
+				from := uri_option(options[cursor + 1]);
+				to := uri_option(options[cursor + 2]);
 				table_set(*plugin.options.host_map, from, to);
 				cursor += 3;
 
 			case "-ssh";
 				ensure_options(3, "must be followed by a host URI and an SSH key reference");
-				host: options[cursor + 1];
-				key: options[cursor + 2];
-				// TODO: Validate the uri and key
+				host := uri_option(options[cursor + 1]);
+				key := ssh_ref_option(options[cursor + 2]);
 				table_set(*plugin.options.ssh_map, host, key);
 				cursor += 3;
 
 			case "-store";
 				ensure_options(2, "must be followed by a directory path");
-				// TODO: Validate the path
-				plugin.options.store = options[cursor + 1];
+				plugin.options.store = dir_option(options[cursor + 1]);
 				cursor += 2;
 
 			case; command_or_invalid();
@@ -228,14 +243,12 @@ jamm_init :: (p: *Metaprogram_Plugin, options: [] string) -> bool {
 			if options[cursor] == {
 			case "-host";
 				ensure_options(2, "must be followed by a host URI");
-				// TODO: Validate the uri
-				plugin.options.publish.host = options[cursor + 1];
+				plugin.options.publish.host = uri_option(options[cursor + 1]);
 				cursor += 2;
 
 			case "-ssh";
 				ensure_options(2, "must be followed by an SSH key reference");
-				// TODO: Validate the key
-				plugin.options.publish.ssh_key = options[cursor + 1];
+				plugin.options.publish.ssh_key = ssh_ref_option(options[cursor + 1]);
 				cursor += 2;
 
 			case; command_or_invalid();
@@ -285,6 +298,7 @@ jamm_message :: (p: *Metaprogram_Plugin, message: *Message) {
 	case .FAILED_IMPORT;
 		failed_import: *Message_Failed_Import = xx message;
 		// TODO: Remap the import here
+		// TODO: Consider: adding a note to the import with the full version + build metadata
 
 	case .IMPORT;
 		import: *Message_Import = xx message;
@@ -338,6 +352,8 @@ jamm_shutdown :: (p: *Metaprogram_Plugin) {
 	plugin: *JAMM_Plugin = xx p;
 	plugin.stage = .SHUTDOWN;
 
+	deinit(*plugin.options.host_map);
+	deinit(*plugin.options.ssh_map);
 	deinit(*plugin.modules);
 }
 
@@ -372,22 +388,25 @@ jamm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) 
 	bool_option :: (value: string) -> bool #expand {
 		if equals_nocase(value, "true") return true;
 		if equals_nocase(value, "false") return false;
-		invalid_value("is not a bool");
+		invalid_value("must be 'true' or 'false'");
 	}
 
-	host_option :: (value: string) -> string #expand {
-		if validate_host(value) return copy_string(value);
-		invalid_value("is not a valid host registry URI");
+	uri_option :: (value: string) -> string #expand {
+		valid, message := validate_uri(value);
+		if valid return copy_string(value);
+		invalid_value(message);
 	}
 
-	key_option :: (value: string) -> string #expand {
-		if validate_key(value) return copy_string(value);
-		invalid_value("is not a valid SSH key reference");
+	ssh_ref_option :: (value: string) -> string #expand {
+		valid, message := validate_ssh_ref(value);
+		if valid return copy_string(value);
+		invalid_value(message);
 	}
 
 	dir_option :: (value: string) -> string #expand {
-		if validate_dir(value) return copy_string(value);
-		invalid_value("is not a valid directory");
+		valid, message := validate_dir(value);
+		if valid return copy_string(value);
+		invalid_value(message);
 	}
 
     if consume(*key, "compatibility.") {
@@ -398,9 +417,9 @@ jamm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) 
         }
     } else if consume(*key, "publish.") {
         if key == "host" {
-            plugin.publish_options.host = host_option(value);
+            plugin.publish_options.host = uri_option(value);
         } else if key == "ssh" {
-            plugin.publish_options.ssh_key = key_option(value);
+            plugin.publish_options.ssh_key = ssh_ref_option(value);
         } else {
             invalid_key();
         }
@@ -408,9 +427,9 @@ jamm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) 
     	if key == "help" {
     		plugin.options.print_help = bool_option(value)
     	} else if consume(*key, "host.") {
-            host_to := host_option(value);
+            host_to := uri_option(value);
             defer free(host_to);
-            host_from := host_option(key);
+            host_from := uri_option(key);
 
     		entry, added := find_or_add(*plugin.options.host_map, host_from);
     		if !added {
@@ -419,9 +438,9 @@ jamm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) 
             }
     		entry.* = copy_string(host_to);
     	} else if consume(*key, "ssh.") {
-            ssh_key := key_option(value);
+            ssh_key := ssh_ref_option(value);
             defer free(ssh_key);
-            ssh_host := host_option(key);
+            ssh_host := uri_option(key);
 
             entry, added := find_or_add(*plugin.options.ssh_map, ssh_host);
             if !added {
@@ -437,6 +456,37 @@ jamm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) 
     }
 
 	return true;
+}
+
+encode_for_uri :: (value: string) -> string {
+	
+}
+
+validate_uri :: (value: string) -> (valid: bool, message: string) {
+
+}
+
+validate_ssh_ref :: (value: string) -> (valid: bool, message: string) {
+
+}
+
+validate_dir :: (value: string) -> (valid: bool, message: string) {
+
+}
+
+validate_version :: (value: Version) -> (valid: bool, message: string) {
+
+}
+
+validate_version_constraint :: (value: Version_Constraint) -> (valid: bool, message: string) {
+
+}
+
+get_license_id :: (name: string) -> int {
+	assert(name.count <= 8, "License key too long!");
+	value: u64;
+	for name  value |= xx it << (56 - it_index * 8);
+	return xx value;
 }
 
 HELP_STRING :: #string DONE
@@ -513,13 +563,6 @@ License :: enum {
 }
 
 #scope_file
-
-get_license_id :: (name: string) -> int {
-	assert(name.count <= 8, "License key too long!");
-	value: u64;
-	for name  value |= xx it << (56 - it_index * 8);
-	return xx value;
-}
 
 #import "Basic";
 #import "Compiler";
