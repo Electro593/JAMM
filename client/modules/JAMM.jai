@@ -1,7 +1,5 @@
 #module_parameters (DEBUG := true);
 
-// TODO: A better name maybe? JMM (Jai Module Manager), or something like JaMM (just-another-module-manager)?
-
 Declare_Options :: struct {
 	vendor: string;
 	name: string;
@@ -136,21 +134,21 @@ print_node :: (node: *Code_Node, indent := 0) {
 	print_node(node, spaces, indent);
 }
 
-plugin: JPM_Plugin = .{
-	init             = jpm_init,
-	before_intercept = jpm_before_intercept,
-	add_source       = jpm_add_source,
-	message          = jpm_message,
-	shutdown         = jpm_shutdown,
-	log_help         = jpm_log_help
+plugin: JAMM_Plugin = .{
+	init             = jamm_init,
+	before_intercept = jamm_before_intercept,
+	add_source       = jamm_add_source,
+	message          = jamm_message,
+	shutdown         = jamm_shutdown,
+	log_help         = jamm_log_help
 };
 
-JPM_Module :: struct {
+JAMM_Module :: struct {
 	file: *Message_File;
 	declaration: *Code_Node;
 }
 
-JPM_Plugin :: struct {
+JAMM_Plugin :: struct {
 	#as using base: Metaprogram_Plugin;
 
 	stage: enum {
@@ -189,16 +187,16 @@ JPM_Plugin :: struct {
 		do_not_skip_expressions_without_notes: bool;
 	}
 
-	modules: Table(*Message_Import, JPM_Module);
+	modules: Table(*Message_Import, JAMM_Module);
 }
 
-jpm_init :: (p: *Metaprogram_Plugin, options: [] string) -> bool {
-	plugin: *JPM_Plugin = xx p;
+jamm_init :: (p: *Metaprogram_Plugin, options: [] string) -> bool {
+	plugin: *JAMM_Plugin = xx p;
 
 	invalid_option :: (reason := "is not a valid option") #expand {
 		full_reason := sprint("'%%' %", `command_prefix, `options[`cursor], reason);
 		defer free(full_reason);
-		log_error("Invalid arguments for JPM: '%': %.\n%", `options, full_reason, `help_string);
+		log_error("Invalid arguments for JAMM: '%': %.\n%", `options, full_reason, `help_string);
 		`return false;
 	}
 
@@ -290,8 +288,8 @@ jpm_init :: (p: *Metaprogram_Plugin, options: [] string) -> bool {
 	return true;
 }
 
-jpm_before_intercept :: (p: *Metaprogram_Plugin, flags: *Intercept_Flags) {
-	plugin: *JPM_Plugin = xx p;
+jamm_before_intercept :: (p: *Metaprogram_Plugin, flags: *Intercept_Flags) {
+	plugin: *JAMM_Plugin = xx p;
 	plugin.stage = .EXECUTING;
 
 	// TODO: Add sensible defaults for store and publish host
@@ -315,14 +313,14 @@ jpm_before_intercept :: (p: *Metaprogram_Plugin, flags: *Intercept_Flags) {
 
 }
 
-jpm_add_source :: (p: *Metaprogram_Plugin) {
-	plugin: *JPM_Plugin = xx p;
+jamm_add_source :: (p: *Metaprogram_Plugin) {
+	plugin: *JAMM_Plugin = xx p;
 
-	add_build_string("__JPM__ :: 0;", p.workspace, cast(*Message) null);
+	add_build_string("__JAMM__ :: 0;", p.workspace, cast(*Message) null);
 }
 
-jpm_message :: (p: *Metaprogram_Plugin, message: *Message) {
-	plugin: *JPM_Plugin = xx p;
+jamm_message :: (p: *Metaprogram_Plugin, message: *Message) {
+	plugin: *JAMM_Plugin = xx p;
 
 	if message.kind == {
 	case .FAILED_IMPORT;
@@ -346,7 +344,7 @@ jpm_message :: (p: *Metaprogram_Plugin, message: *Message) {
 		case .FILE;
 			if file.fully_pathed_filename == import.fully_pathed_filename {
 				module.file = file;
-				add_build_string("__JPM__ :: 0;", plugin.workspace, file);
+				add_build_string("__JAMM__ :: 0;", plugin.workspace, file);
 			}
 		}
 
@@ -354,9 +352,9 @@ jpm_message :: (p: *Metaprogram_Plugin, message: *Message) {
 		typechecked: *Message_Typechecked = xx message;
 		for typechecked.declarations {
 			decl := it.expression;
-			is_declaration := decl.name == "__JPM_DECLARATION__";
+			is_declaration := decl.name == "__JAMM_DECLARATION__";
 			for decl.notes
-				is_declaration |= it.text == "__JPM_DECLARATION__";
+				is_declaration |= it.text == "__JAMM_DECLARATION__";
 
 			if is_declaration {
 				file := decl.enclosing_load;
@@ -369,27 +367,27 @@ jpm_message :: (p: *Metaprogram_Plugin, message: *Message) {
 	}
 }
 
-jpm_finish :: (p: *Metaprogram_Plugin) {
-	plugin: *JPM_Plugin = xx p;
+jamm_finish :: (p: *Metaprogram_Plugin) {
+	plugin: *JAMM_Plugin = xx p;
 
 	// TODO: Publish here, making sure it built...? Maybe. We'll see.
 
 	plugin.stage = .FINISHED;
 }
 
-jpm_shutdown :: (p: *Metaprogram_Plugin) {
-	plugin: *JPM_Plugin = xx p;
+jamm_shutdown :: (p: *Metaprogram_Plugin) {
+	plugin: *JAMM_Plugin = xx p;
 	plugin.stage = .SHUTDOWN;
 
 	deinit(*plugin.modules);
 }
 
-jpm_log_help :: (p: *Metaprogram_Plugin) {
+jamm_log_help :: (p: *Metaprogram_Plugin) {
 	log(HELP_STRING);
 }
 
-jpm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -> bool {
-	plugin: *JPM_Plugin = xx p;
+jamm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -> bool {
+	plugin: *JAMM_Plugin = xx p;
 
     consume :: (key: *string, prefix: string) -> bool {
         if begins_with(key, prefix) {
@@ -400,17 +398,17 @@ jpm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -
     }
 
 	invalid_key :: (reason: string = "Unrecognized option") #expand {
-		log_error("Invalid JPM communication key '%': %\n", `key, reason);
+		log_error("Invalid JAMM communication key '%': %\n", `key, reason);
 		`return false;
 	}
 
 	invalid_value :: (reason: string) #expand {
-		log_error("Invalid value for JPM communication key '%': '%' %\n", `key, `value, reason);
+		log_error("Invalid value for JAMM communication key '%': '%' %\n", `key, `value, reason);
 		`return false;
 	}
 
 	if plugin.stage >= .EXECUTING
-		invalid_key("JPM cannot be configured once it has begun executing");
+		invalid_key("JAMM cannot be configured once it has begun executing");
 
 	bool_option :: (value: string) -> bool #expand {
 		if equals_nocase(value, "true") return true;
@@ -485,15 +483,15 @@ jpm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -
 
 HELP_STRING :: #string DONE
 
-+JPM [..OPTIONS] [ .. COMMAND [..] ]
++JAMM [..OPTIONS] [ .. COMMAND [..] ]
 
-Resolve JPM imports in the target program.
+Resolve JAMM imports in the target program.
 
 Options
 	-help			Print this help message, or that of the command.
 	-host FROM TO	Override the given FROM host URI to the given TO host URI.
 	-ssh URI KEY	Override the default SSH agent with a specific key for a
-					given host URI. See `+JPM -help publish` for URI and KEY
+					given host URI. See `+JAMM -help publish` for URI and KEY
 					constraints.
 	-store DIR		Override the default module store location. DIR must be a
 					valid directory on your computer.
@@ -505,7 +503,7 @@ DONE
 
 PUBLISH_HELP_STRING :: #string DONE
 
-+JPM [..] publish [..OPTIONS]
++JAMM [..] publish [..OPTIONS]
 
 Publish your module to the module registry.
 
