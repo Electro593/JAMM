@@ -62,7 +62,7 @@ make_module_uri :: (options: Import_Options) -> string {
 	assert(name);
 
 	version := options.version;
-	valid, message = validate_version(version);
+	valid, message = validate_version_constraint(version);
 	assert(valid, message);
 
 	builder: String_Builder;
@@ -94,12 +94,14 @@ get_plugin :: () -> *Metaprogram_Plugin {
 #scope_file
 
 plugin: JAMM_Plugin = .{
-	init             = jamm_init,
-	before_intercept = jamm_before_intercept,
-	add_source       = jamm_add_source,
-	message          = jamm_message,
-	shutdown         = jamm_shutdown,
-	log_help         = jamm_log_help
+	init               = jamm_init,
+	before_intercept   = jamm_before_intercept,
+	add_source         = jamm_add_source,
+	message            = jamm_message,
+	finish             = jamm_finish,
+	shutdown           = jamm_shutdown,
+	log_help           = jamm_log_help,
+	communication_proc = jamm_communication_proc
 };
 
 JAMM_Module :: struct {
@@ -599,14 +601,60 @@ validate_dir :: (value: string) -> (valid: bool, message: string) {
 	return false, "";
 }
 
-validate_version :: (value: Version) -> (valid: bool, message: string) {
-	// TODO
-	return false, "";
+validate_version :: (using value: Version) -> (valid: bool, message: string) {
+	valid, message = validate_semver_identifiers(pre_release);
+	if !valid return tprint("has a pre-release which %", message);
+
+	valid, message = validate_semver_identifiers(build_metadata, allow_leading = true);
+	if !valid return tprint("has build metadata which %", message);
+
+	return true;
 }
 
-validate_version_constraint :: (value: Version_Constraint) -> (valid: bool, message: string) {
-	// TODO
-	return false, "";
+validate_version_constraint :: (using value: Version_Constraint) -> (valid: bool, message: string) {
+	if match == .LATEST_MINOR && !major
+		return false, "specifies match-latest-minor with major version 0";
+	if match == .LATEST_PATCH && !minor
+		return false, "specifies match-latest-patch with minor version 0";
+	if match == .LATEST_PRE_RELEASE && !patch
+		return false, "specifies match-latest-pre-release with patch version 0";
+
+	valid, message := validate_semver_identifiers(pre_release);
+	if !valid return tprint("has a pre-release which %", message);
+
+	return true;
+}
+
+validate_semver_identifiers :: (value: string, allow_leading := false) -> (valid: bool, message := "") {
+	identifier_start := 0;
+	starts_with_0 := false;
+	has_nondigit := false;
+
+	for 0 .. value.count {
+		if it == value.count || value[it] == #char "." {
+			if it == identifier_start
+				return false, "has an empty identifier";
+			if !allow_leading && it > identifier_start + 1 && starts_with_0 && !has_nondigit
+				return false, "has a numeric identifier with a leading zero";
+
+			identifier_start = it + 1;
+			has_nondigit = 0;
+			continue;
+		}
+
+		c := value[it];
+
+		if it == identifier_start
+			starts_with_0 = c == #char "0";
+
+		is_nondigit := is_alpha(c) || c == #char "-";
+		has_nondigit |= is_nondigit;
+
+		if !is_nondigit && !is_digit(c)
+			return false, "has an identifier with an invalid character (must be [0-9A-Za-z-])";
+	}
+
+	return true;
 }
 
 get_license_id :: (name: string) -> int {
