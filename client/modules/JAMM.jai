@@ -1,5 +1,3 @@
-#module_parameters (DEBUG := true);
-
 Declare_Options :: struct {
 	vendor: string;
 	name: string;
@@ -38,38 +36,6 @@ Version_Constraint :: struct {
 	} = .EXACT;
 }
 
-License :: enum {
-	UNSPECIFIED :: 0;
-	UNLICENSED  :: 1;
-
-	// Based on SPDX: https://spdx.org/licenses/.
-	// There are many more licenses than just this, but here are the most
-	// common ones.
-
-	APACHE_1_0                    :: #run get_license_id("APACHE10");  // Apache-1.0
-	APACHE_1_1                    :: #run get_license_id("APACHE11");  // Apache-1.1
-	APACHE_2_0                    :: #run get_license_id("APACHE20");  // Apache-2.0
-	BSD_1_CLAUSE                  :: #run get_license_id("BSD1C");     // BSD-1-Clause
-	BSD_2_CLAUSE                  :: #run get_license_id("BSD2C");     // BSD-2-Clause
-	BSD_3_CLAUSE                  :: #run get_license_id("BSD3C");     // BSD-3-Clause
-	BSD_4_CLAUSE                  :: #run get_license_id("BSD4C");     // BSD-4-Clause
-	BLESSING                      :: #run get_license_id("BLESSING");  // blessing
-	GPL_1_0_ONLY                  :: #run get_license_id("GPL10");     // GPL-1.0-only
-	GPL_1_0_OR_LATER              :: #run get_license_id("GPL10+");    // GPL-1.0-or-later
-	GPL_2_0_ONLY                  :: #run get_license_id("GPL20");     // GPL-2.0-only
-	GPL_2_0_OR_LATER              :: #run get_license_id("GPL20+");    // GPL-2.0-or-later
-	GPL_3_0_ONLY                  :: #run get_license_id("GPL30");     // GPL-3.0-only
-	GPL_3_0_OR_LATER              :: #run get_license_id("GPL30+");    // GPL-3.0-or-later
-	ISC                           :: #run get_license_id("ISC");       // ISC
-	MIT                           :: #run get_license_id("MIT");       // MIT
-	MPL_1_0                       :: #run get_license_id("MPL10");     // MPL-1.0
-	MPL_1_1                       :: #run get_license_id("MPL11");     // MPL-1.1
-	MPL_2_0                       :: #run get_license_id("MPL20");     // MPL-2.0
-	MPL_2_0_NO_COPYLEFT_EXCEPTION :: #run get_license_id("MPL20NCE");  // MPL-2.0-no-copyleft-exception
-	UNICODE_3_0                   :: #run get_license_id("UNICOD30");  // Unicode-3.0
-	UNLICENSE                     :: #run get_license_id("UNLICENS");  // Unlicense
-}
-
 import :: (options: Import_Options, $toplevel_scope := #caller_code) #expand {
 	make_import :: (using options: Import_Options) -> string {
 		// TODO: Make this actually a thing
@@ -89,13 +55,6 @@ get_plugin :: () -> *Metaprogram_Plugin {
 }
 
 #scope_file
-
-get_license_id :: (name: string) -> int {
-	assert(name.count <= 8, "License key too long!");
-	value: u64;
-	for name  value |= xx it << (56 - it_index * 8);
-	return xx value;
-}
 
 print_node :: (node: *Code_Node, indent := 0) {
 	_spaces: [256] u8;
@@ -480,7 +439,6 @@ jamm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) 
 	return true;
 }
 
-
 HELP_STRING :: #string DONE
 
 +JAMM [..OPTIONS] [ .. COMMAND [..] ]
@@ -519,6 +477,49 @@ ptions:
 				path to a public key.
 
 DONE
+
+#scope_export
+
+License :: enum {
+	UNSPECIFIED :: 0;
+	UNLICENSED  :: 1;
+
+	// Based on SPDX: https://spdx.org/licenses/.
+	// There are many more licenses than just this, but here are the most
+	// common ones.
+
+	APACHE_1_0                    :: #run get_license_id("APACHE10");  // Apache-1.0
+	APACHE_1_1                    :: #run get_license_id("APACHE11");  // Apache-1.1
+	APACHE_2_0                    :: #run get_license_id("APACHE20");  // Apache-2.0
+	BSD_1_CLAUSE                  :: #run get_license_id("BSD1C");     // BSD-1-Clause
+	BSD_2_CLAUSE                  :: #run get_license_id("BSD2C");     // BSD-2-Clause
+	BSD_3_CLAUSE                  :: #run get_license_id("BSD3C");     // BSD-3-Clause
+	BSD_4_CLAUSE                  :: #run get_license_id("BSD4C");     // BSD-4-Clause
+	BLESSING                      :: #run get_license_id("BLESSING");  // blessing
+	GPL_1_0_ONLY                  :: #run get_license_id("GPL10");     // GPL-1.0-only
+	GPL_1_0_OR_LATER              :: #run get_license_id("GPL10+");    // GPL-1.0-or-later
+	GPL_2_0_ONLY                  :: #run get_license_id("GPL20");     // GPL-2.0-only
+	GPL_2_0_OR_LATER              :: #run get_license_id("GPL20+");    // GPL-2.0-or-later
+	GPL_3_0_ONLY                  :: #run get_license_id("GPL30");     // GPL-3.0-only
+	GPL_3_0_OR_LATER              :: #run get_license_id("GPL30+");    // GPL-3.0-or-later
+	ISC                           :: #run get_license_id("ISC");       // ISC
+	MIT                           :: #run get_license_id("MIT");       // MIT
+	MPL_1_0                       :: #run get_license_id("MPL10");     // MPL-1.0
+	MPL_1_1                       :: #run get_license_id("MPL11");     // MPL-1.1
+	MPL_2_0                       :: #run get_license_id("MPL20");     // MPL-2.0
+	MPL_2_0_NO_COPYLEFT_EXCEPTION :: #run get_license_id("MPL20NCE");  // MPL-2.0-no-copyleft-exception
+	UNICODE_3_0                   :: #run get_license_id("UNICOD30");  // Unicode-3.0
+	UNLICENSE                     :: #run get_license_id("UNLICENS");  // Unlicense
+}
+
+#scope_file
+
+get_license_id :: (name: string) -> int {
+	assert(name.count <= 8, "License key too long!");
+	value: u64;
+	for name  value |= xx it << (56 - it_index * 8);
+	return xx value;
+}
 
 #import "Basic";
 #import "Compiler";
