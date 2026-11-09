@@ -38,14 +38,71 @@ Version_Constraint :: struct {
 	} = .EXACT;
 }
 
+Module :: struct {
+	file: *Message_File;
+	declaration: *Code_Node;
+}
+
+Plugin :: struct {
+	#as using base: Metaprogram_Plugin;
+
+	stage: enum {
+		UNINITIALIZED;
+		INITIALIZED;
+		PREPARED;
+		EXECUTING;
+		FINISHED;
+		SHUTDOWN;
+	} = .UNINITIALIZED;
+
+	Options :: struct {
+		// If true, just print help and exit.
+		print_help: bool;
+
+		// Per-host uri overrides.
+		host_map: Table(string, string);
+
+		// Per-host SSH key overrides.
+		ssh_map: Table(string, string);
+
+		// Module store path override.
+		store: string;
+
+		Publish :: struct {
+			// Target registry host override.
+			host: string;
+
+			// Target host SSH key override.
+			ssh_key: string;
+		}
+
+		// Publish commands, keyed on module name.
+		publish: Table(string, Publish);
+
+		Compatibility :: struct {
+			// Allows surrogate halves in your utf8 strings. But why?
+			allow_wobbly_utf8: bool;
+
+			// Don't skip any expressions, something else will configure that.
+			do_not_skip_expressions: bool;
+		}
+
+		compatibility: Compatibility;
+	}
+
+	options: Options;
+
+	modules: Table(*Message_Import, Module);
+}
+
 import :: (options: Import_Options, $toplevel_scope := #caller_code) #expand {
 	make_import :: (options: Import_Options) -> string {
 		uri := make_module_uri(options);
 		defer free(uri);
-		return tprint("#import,dir \"%\";", uri);
+		return tprint("#import \"%\";", uri);
 	}
 
-	#insert,scope(toplevel_scope) #run make_module_uri(options);
+	#insert,scope(toplevel_scope) #run make_import(options);
 }
 
 make_module_uri :: (options: Import_Options) -> string {
@@ -55,11 +112,11 @@ make_module_uri :: (options: Import_Options) -> string {
 
 	vendor := encode_uri_path_segment(options.vendor, allow_wobbly = true);
 	defer free(vendor);
-	assert(vendor);
+	assert(vendor != "");
 
 	name := encode_uri_path_segment(options.name, allow_wobbly = true);
 	defer free(name);
-	assert(name);
+	assert(name != "");
 
 	version := options.version;
 	valid, message = validate_version_constraint(version);
@@ -87,77 +144,65 @@ make_module_uri :: (options: Import_Options) -> string {
 	return builder_to_string(*builder);
 }
 
-get_plugin :: () -> *Metaprogram_Plugin {
-	return *plugin;
+get_plugin :: () -> *Plugin {
+	plugin := New(Plugin);
+
+	plugin.init               = init;
+	plugin.before_intercept   = before_intercept;
+	plugin.add_source         = add_source;
+	plugin.message            = message;
+	plugin.finish             = finish;
+	plugin.shutdown           = shutdown;
+	plugin.log_help           = log_help;
+	plugin.communication_proc = communication_proc;
+
+	return plugin;
+}
+
+// You can use this instead of the plugin CLI or manual configuration. However,
+// if you want to do anything fancy, you should make an actual plugin interop.
+run_plugin :: (build_string: string, plugin_options: [] string = .[], loc := #caller_location) {
+	plugin := get_plugin();
+
+	workspace := compiler_create_workspace("JAMM Default Workspace");
+	plugin.workspace = workspace;
+	plugin.init(plugin, plugin_options);
+
+	options := get_build_options(workspace);
+	options.output_type = .NO_OUTPUT;
+	options.write_added_strings = false;
+
+	// TODO: HACK: Fix this
+	import_path: [..] string;
+	array_add(*import_path, "../jamm/client/modules");
+	array_add(*import_path, ..options.import_path);
+	options.import_path = import_path;
+
+	set_build_options(options, workspace, loc=loc);
+
+	flags: Intercept_Flags;
+	plugin.before_intercept(plugin, *flags);
+	compiler_begin_intercept(workspace, flags);
+
+	plugin.add_source(plugin);
+	add_build_string(build_string, workspace);
+
+	while true {
+		message := compiler_wait_for_message();
+		plugin.message(plugin, message);
+		if message.kind == .COMPLETE break;
+	}
+
+	compiler_end_intercept(workspace);
+	plugin.finish(plugin);
+	plugin.shutdown(plugin);
 }
 
 #scope_file
 
-plugin: JAMM_Plugin = .{
-	base = .{
-		init               = jamm_init,
-		before_intercept   = jamm_before_intercept,
-		add_source         = jamm_add_source,
-		message            = jamm_message,
-		finish             = jamm_finish,
-		shutdown           = jamm_shutdown,
-		log_help           = jamm_log_help,
-		communication_proc = jamm_communication_proc
-	}
-};
-
-JAMM_Module :: struct {
-	file: *Message_File;
-	declaration: *Code_Node;
-}
-
-JAMM_Plugin :: struct {
-	#as using base: Metaprogram_Plugin;
-
-	stage: enum {
-		UNINITIALIZED;
-		INITIALIZED;
-		EXECUTING;
-		FINISHED;
-		SHUTDOWN;
-	} = .UNINITIALIZED;
-
-	options: struct {
-		// If true, just print help and exit.
-		print_help: bool;
-
-		// Per-host uri overrides.
-		host_map: Table(string, string);
-
-		// Per-host SSH key overrides.
-		ssh_map: Table(string, string);
-
-		// Module store path override.
-		store: string;
-	}
-
-	publish: bool;
-	publish_options: struct {
-		// Target registry host override.
-		host: string;
-
-		// Target host SSH key override.
-		ssh_key: string;
-	}
-
-	compatibility_options: struct {
-		// Allows surrogate halves in your utf8 strings. But why?
-		allow_wobbly_utf8: bool;
-
-		// Don't tell the intercept to skip expressions without notes
-		do_not_skip_expressions_without_notes: bool;
-	}
-
-	modules: Table(*Message_Import, JAMM_Module);
-}
-
-jamm_init :: (p: *Metaprogram_Plugin, options: [] string) -> bool {
-	plugin: *JAMM_Plugin = xx p;
+init :: (p: *Metaprogram_Plugin, options: [] string) -> bool {
+	plugin: *Plugin = xx p;
+	assert(plugin.stage == .UNINITIALIZED);
 
 	invalid_option :: (reason := "is not a valid option") #expand {
 		full_reason := sprint("'%%' %", `command_prefix, `options[`cursor], reason);
@@ -202,6 +247,8 @@ jamm_init :: (p: *Metaprogram_Plugin, options: [] string) -> bool {
 	command_prefix := "";
 	help_string := HELP_STRING;
 
+	publish_options: *Plugin.Options.Publish;
+
 	cursor := 0;
 	while cursor < options.count {
 		if #complete parse_mode == {
@@ -236,9 +283,10 @@ jamm_init :: (p: *Metaprogram_Plugin, options: [] string) -> bool {
 		case .NEXT_COMMAND;
 			if options[cursor] == {
 			case "publish";
-				plugin.publish = true;
+				ensure_options(2, "must be followed by a module name");
+				publish_options = find_or_add(*plugin.options.publish, options[cursor + 1]);
 				parse_mode = .PUBLISH;
-				cursor += 1;
+				cursor += 2;
 
 			case; invalid_option("is not a valid command");
 			}
@@ -250,12 +298,12 @@ jamm_init :: (p: *Metaprogram_Plugin, options: [] string) -> bool {
 			if options[cursor] == {
 			case "-host";
 				ensure_options(2, "must be followed by a host URI");
-				plugin.publish_options.host = uri_option(options[cursor + 1]);
+				publish_options.host = uri_option(options[cursor + 1]);
 				cursor += 2;
 
 			case "-ssh";
 				ensure_options(2, "must be followed by an SSH key reference");
-				plugin.publish_options.ssh_key = ssh_ref_option(options[cursor + 1]);
+				publish_options.ssh_key = ssh_ref_option(options[cursor + 1]);
 				cursor += 2;
 
 			case; command_or_invalid();
@@ -267,43 +315,55 @@ jamm_init :: (p: *Metaprogram_Plugin, options: [] string) -> bool {
 	return true;
 }
 
-jamm_before_intercept :: (p: *Metaprogram_Plugin, flags: *Intercept_Flags) {
-	plugin: *JAMM_Plugin = xx p;
-	plugin.stage = .EXECUTING;
+before_intercept :: (p: *Metaprogram_Plugin, flags: *Intercept_Flags) {
+	plugin: *Plugin = xx p;
+	assert(plugin.stage == .INITIALIZED);
+
+	has_publish := plugin.options.publish.count > 0;
 
 	// TODO: Add sensible defaults for store and publish host
 
 	if plugin.options.print_help {
-		if plugin.publish log(PUBLISH_HELP_STRING);
+		if has_publish log(PUBLISH_HELP_STRING);
 		else log(HELP_STRING);
 		exit(0);
 	}
 
-	if plugin.publish {
+	if has_publish {
+		if !plugin.options.compatibility.do_not_skip_expressions
+			flags.* |= .SKIP_ALL;
+
 		flags.* &= ~.SKIP_DECLARATIONS;
-		if !plugin.compatibility_options.do_not_skip_expressions_without_notes
-			flags.* |= .SKIP_EXPRESSIONS_WITHOUT_NOTES;
 	}
+
+	plugin.stage = .PREPARED;
 }
 
-jamm_add_source :: (p: *Metaprogram_Plugin) {
-	plugin: *JAMM_Plugin = xx p;
+add_source :: (p: *Metaprogram_Plugin) {
+	plugin: *Plugin = xx p;
+	assert(plugin.stage == .PREPARED);
 
 	add_build_string("__JAMM__ :: 0;", p.workspace, cast(*Message) null);
+
+	plugin.stage = .EXECUTING;
 }
 
-jamm_message :: (p: *Metaprogram_Plugin, message: *Message) {
-	plugin: *JAMM_Plugin = xx p;
+message :: (p: *Metaprogram_Plugin, message: *Message) {
+	plugin: *Plugin = xx p;
+	assert(plugin.stage == .EXECUTING);
 
 	if message.kind == {
 	case .FAILED_IMPORT;
 		failed_import: *Message_Failed_Import = xx message;
+		print("%\n", failed_import.*);
 		// TODO: Remap the import here
 		// TODO: Consider: adding a note to the import with the full version + build metadata
 
 	case .IMPORT;
 		import: *Message_Import = xx message;
 		table_set(*plugin.modules, import, .{});
+
+		// TODO: Check that we're not importing anything other than JAMM imports or builtin modules
 
 	case .FILE;
 		file: *Message_File = xx message;
@@ -341,16 +401,18 @@ jamm_message :: (p: *Metaprogram_Plugin, message: *Message) {
 	}
 }
 
-jamm_finish :: (p: *Metaprogram_Plugin) {
-	plugin: *JAMM_Plugin = xx p;
+finish :: (p: *Metaprogram_Plugin) {
+	plugin: *Plugin = xx p;
+	assert(plugin.stage == .EXECUTING);
 
 	// TODO: Publish here, making sure it built...? Maybe. We'll see.
 
 	plugin.stage = .FINISHED;
 }
 
-jamm_shutdown :: (p: *Metaprogram_Plugin) {
-	plugin: *JAMM_Plugin = xx p;
+shutdown :: (p: *Metaprogram_Plugin) {
+	plugin: *Plugin = xx p;
+	assert(plugin.stage == .FINISHED);
 	plugin.stage = .SHUTDOWN;
 
 	deinit(*plugin.options.host_map);
@@ -358,33 +420,78 @@ jamm_shutdown :: (p: *Metaprogram_Plugin) {
 	deinit(*plugin.modules);
 }
 
-jamm_log_help :: (p: *Metaprogram_Plugin) {
+log_help :: (p: *Metaprogram_Plugin) {
 	log(HELP_STRING);
 }
 
-jamm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -> bool {
-	plugin: *JAMM_Plugin = xx p;
+communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -> bool {
+	plugin: *Plugin = xx p;
+	original_key := key;
 
-    consume :: (key: *string, prefix: string) -> bool {
-        if begins_with_nocase(key.*, prefix) {
-            advance(key, prefix.count);
-            return true;
-        }
-        return false;
-    }
+	if plugin.stage >= .PREPARED {
+		log_error("JAMM cannot be configured once it has been prepared");
+		return false;
+	}
 
 	invalid_key :: (reason: string = "Unrecognized option") #expand {
-		log_error("Invalid JAMM communication key '%': %\n", `key, reason);
+		log_error("Invalid JAMM communication key '%': %\n", `original_key, reason);
 		`return false;
 	}
+
+	consume :: (key: *string) -> string #expand {
+		i := 0;
+		subkey := copy_string(key.*);
+		is_escape := false;
+
+		for key.* {
+			if is_escape {
+				is_escape = false;
+				if it == {
+				case #char "\\"; #through;
+				case #char ".";
+					subkey[i] = it;
+					i += 1;
+				case;
+					free(subkey);
+					invalid_key("Invalid escape (must be '\\\\' or '\\.')");
+				}
+			} else {
+				if it == {
+				case #char "\\";
+					is_escape = true;
+				case #char ".";
+					subkey.count = i;
+					advance(key, i + 1);
+					return subkey;
+				case;
+					subkey[i] = it;
+					i += 1;
+				}
+			}
+		}
+
+		if is_escape {
+			free(subkey);
+			invalid_key("Key cannot end with an unpaired escape ('\\')");
+		}
+
+		subkey.count = i;
+		advance(key, i);
+		return subkey;
+	}
+
+    consume :: (key: *string, subkey: string) -> bool #expand {
+		expected_subkey := subkey;
+		found_subkey := consume(key,, temp);
+		if ends_with(expected_subkey, ".") expected_subkey.count -= 1;
+		else if key return false;
+		return equal_nocase(found_subkey, expected_subkey);
+    }
 
 	invalid_value :: (reason: string) #expand {
-		log_error("Invalid value for JAMM communication key '%': '%' %\n", `key, `value, reason);
+		log_error("Invalid value for JAMM communication key '%': '%' %\n", `original_key, `value, reason);
 		`return false;
 	}
-
-	if plugin.stage >= .EXECUTING
-		invalid_key("JAMM cannot be configured once it has begun executing");
 
 	bool_option :: (value: string) -> bool #expand {
 		if equal_nocase(value, "true") return true;
@@ -411,26 +518,36 @@ jamm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) 
 	}
 
     if consume(*key, "compatibility.") {
-		if equal_nocase(key, "allow_wobbly_utf8") {
-			plugin.compatibility_options.allow_wobbly_utf8 = bool_option(value);
-        } else if equal_nocase(key, "do_not_skip_expressions_without_notes") {
-            plugin.compatibility_options.do_not_skip_expressions_without_notes = bool_option(value);
+		if consume(*key, "allow_wobbly_utf8") {
+			plugin.options.compatibility.allow_wobbly_utf8 = bool_option(value);
+        } else if consume(*key, "do_not_skip_expressions") {
+            plugin.options.compatibility.do_not_skip_expressions = bool_option(value);
         } else {
             invalid_key();
         }
     } else if consume(*key, "publish.") {
-        if equal_nocase(key, "host") {
-            plugin.publish_options.host = uri_option(value);
-        } else if equal_nocase(key, "ssh") {
-            plugin.publish_options.ssh_key = ssh_ref_option(value);
-        } else {
-            invalid_key();
-        }
+		module := consume(*key);
+
+		publish_options, added := find_or_add(*plugin.options.publish, module);
+		if !added free(module);
+
+		if consume(*key, "host") {
+			if publish_options.host free(publish_options.host);
+			publish_options.host = uri_option(value);
+		} else if consume(*key, "ssh") {
+			if publish_options.ssh_key free(publish_options.ssh_key);
+			publish_options.ssh_key = ssh_ref_option(value);
+		} else {
+			invalid_key();
+		}
     } else {
     	if consume(*key, "host.") {
+			subkey := consume(*key,, temp);
+			if key invalid_key();
+
             host_to := uri_option(value);
             defer free(host_to);
-            host_from := uri_option(key);
+            host_from := uri_option(subkey);
 
     		entry, added := find_or_add(*plugin.options.host_map, host_from);
     		if !added {
@@ -439,9 +556,12 @@ jamm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) 
             }
     		entry.* = copy_string(host_to);
     	} else if consume(*key, "ssh.") {
+			subkey := consume(*key);
+			if key invalid_key();
+
             ssh_key := ssh_ref_option(value);
             defer free(ssh_key);
-            ssh_host := uri_option(key);
+            ssh_host := uri_option(subkey);
 
             entry, added := find_or_add(*plugin.options.ssh_map, ssh_host);
             if !added {
@@ -449,7 +569,8 @@ jamm_communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) 
                 free(entry.*);
             }
             entry.* = copy_string(ssh_key);
-        } else if equal_nocase(key, "store") {
+        } else if consume(*key, "store") {
+            if plugin.options.store free(plugin.options.store);
             plugin.options.store = dir_option(value);
         } else {
             invalid_key();
@@ -469,7 +590,7 @@ encode_uri_path_segment :: (
 	// TODO: scheme-aware should_encode_delim
 
 	_utf8: [4] u8;
-	utf8 := string.{ utf8.data, utf8.count };
+	utf8 := string.{ _utf8.count, _utf8.data };
 
 	buffer: [..] u8;
 	array_reserve(*buffer, value.count);
@@ -479,7 +600,7 @@ encode_uri_path_segment :: (
 		codepoint, to_advance := read_utf32_codepoint(advance(value, i), allow_wobbly);
 		i += to_advance;
 
-		success, length := write_utf32_codepoint(codepoint, utf8, allow_wobbly);
+		success:, utf8.count = write_utf32_codepoint(utf8, codepoint, allow_wobbly);
 		assert(success);
 
 		for utf8 {
@@ -517,7 +638,7 @@ encode_uri_path_segment :: (
 		}
 	}
 
-	return .{ buffer.data, buffer.count };
+	return .{ buffer.count, buffer.data };
 }
 
 // The version in Unicode.jai doesn't handle errors correctly
@@ -563,14 +684,14 @@ write_utf32_codepoint :: (s: string, c: u32, allow_wobbly := false) -> (success:
 
 	if c <= 0x7F {
 		if s.count < 1 return false, 1;
-		s[0] = c;
+		s[0] = xx c;
 		return true, 1;
 	}
 
 	if c <= 0x7FF {
 		if s.count < 2 return false, 2;
-		s[0] = 0xC0 | ((c >> 6) & 0x1F);
-		s[1] = 0x80 | (c & 0x3F);
+		s[0] = xx (0xC0 | ((c >> 6) & 0x1F));
+		s[1] = xx (0x80 | (c & 0x3F));
 		return true, 2;
 	}
 
@@ -579,17 +700,17 @@ write_utf32_codepoint :: (s: string, c: u32, allow_wobbly := false) -> (success:
 
 	if c <= 0xFFFF {
 		if s.count < 3 return false, 3;
-		s[0] = 0xE0 | ((c >> 12) & 0x0F);
-		s[1] = 0x80 | ((c >> 6) & 0x3F);
-		s[2] = 0x80 | (c & 0x3F);
+		s[0] = xx (0xE0 | ((c >> 12) & 0x0F));
+		s[1] = xx (0x80 | ((c >> 6) & 0x3F));
+		s[2] = xx (0x80 | (c & 0x3F));
 		return true, 3;
 	}
 
 	if s.count < 4 return false, 4;
-	s[0] = 0xF0 | ((c >> 18) & 0x07);
-	s[1] = 0x80 | ((c >> 12) & 0x3F);
-	s[2] = 0x80 | ((c >> 6) & 0x3F);
-	s[3] = 0x80 | (c & 0x3F);
+	s[0] = xx (0xF0 | ((c >> 18) & 0x07));
+	s[1] = xx (0x80 | ((c >> 12) & 0x3F));
+	s[2] = xx (0x80 | ((c >> 6) & 0x3F));
+	s[3] = xx (0x80 | (c & 0x3F));
 	return true, 4;
 }
 
@@ -657,17 +778,17 @@ validate_dir :: (value: string) -> (valid: bool, message := "") {
 	return true;
 }
 
-validate_version :: (using value: Version) -> (valid: bool, message: string) {
+validate_version :: (using value: Version) -> (valid: bool, message := "") {
 	valid, message = validate_semver_identifiers(pre_release);
-	if !valid return tprint("has a pre-release which %", message);
+	if !valid return false, tprint("has a pre-release which %", message);
 
 	valid, message = validate_semver_identifiers(build_metadata, allow_leading = true);
-	if !valid return tprint("has build metadata which %", message);
+	if !valid return false, tprint("has build metadata which %", message);
 
 	return true;
 }
 
-validate_version_constraint :: (using value: Version_Constraint) -> (valid: bool, message: string) {
+validate_version_constraint :: (using value: Version_Constraint) -> (valid: bool, message := "") {
 	if match == .LATEST_MINOR && !major
 		return false, "specifies match-latest-minor with major version 0";
 	if match == .LATEST_PATCH && !minor
@@ -676,12 +797,14 @@ validate_version_constraint :: (using value: Version_Constraint) -> (valid: bool
 		return false, "specifies match-latest-pre-release with patch version 0";
 
 	valid, message := validate_semver_identifiers(pre_release);
-	if !valid return tprint("has a pre-release which %", message);
+	if !valid return false, tprint("has a pre-release which %", message);
 
 	return true;
 }
 
 validate_semver_identifiers :: (value: string, allow_leading := false) -> (valid: bool, message := "") {
+	if !value return true;
+
 	identifier_start := 0;
 	starts_with_0 := false;
 	has_nondigit := false;
@@ -694,7 +817,7 @@ validate_semver_identifiers :: (value: string, allow_leading := false) -> (valid
 				return false, "has a numeric identifier with a leading zero";
 
 			identifier_start = it + 1;
-			has_nondigit = 0;
+			has_nondigit = false;
 			continue;
 		}
 
