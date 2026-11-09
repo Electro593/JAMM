@@ -38,7 +38,7 @@ Version_Constraint :: struct {
 	} = .EXACT;
 }
 
-Module_Id :: struct {
+Module_ID :: struct {
 	vendor: string;
 	name: string;
 }
@@ -75,13 +75,13 @@ Plugin :: struct {
 
 		// Per-module host uri overrides.
 		// FUTURE: Allow vendor to be omitted, use config if available
-		host_map: Table(Module_Id, string, hash_module_id, are_module_ids_equal);
+		host_map: Table(Module_ID, string, hash_module_id, are_module_ids_equal);
 
 		// Per-host SSH key overrides.
 		ssh_map: Table(string, string);
 
 		// Modules to publish.
-		publish: Table(Module_Id, void, hash_module_id, are_module_ids_equal);
+		publish: Table(Module_ID, void, hash_module_id, are_module_ids_equal);
 
 		Compatibility :: struct {
 			// Allow surrogate halves in your utf8 strings. But why?
@@ -131,10 +131,7 @@ make_module_uri :: (options: Import_Options) -> string {
 	builder: String_Builder;
 	init_string_builder(*builder);
 
-	if host print_to_builder(*builder, "jamm-%", host);
-	else print_to_builder(*builder, "jamm://");
-
-	print_to_builder(*builder, "/%/%", vendor, name);
+	print_to_builder(*builder, "jamm:%/%/%", host, vendor, name);
 	print_to_builder(*builder, "/%.%.%", version.major, version.minor, version.patch);
 
 	if version.pre_release
@@ -311,15 +308,46 @@ before_intercept :: (p: *Metaprogram_Plugin, flags: *Intercept_Flags) {
 	plugin: *Plugin = xx p;
 	assert(plugin.stage == .INITIALIZED);
 
+	config_error :: (value: string, reason: string) {
+		log_error("Invalid JAMM configuration: '%' %.\n", value, reason);
+		exit(1);
+	}
+
 	if plugin.options.print_help {
 		log(HELP_STRING);
 		exit(0);
 	}
 
-	if !plugin.options.store {
-		plugin.options.store = get_default_store_path();
+	{
+		File_Utilities :: #import "File_Utilities";
+
+		#if OS == .WINDOWS
+			replace(*plugin.options.store, #char "\\", #char "/");
+
 		if !plugin.options.store
-			log("Could not determine the path to a module store. Will fallback to no caching.");
+			plugin.options.store = get_default_store_path();
+
+		if !plugin.options.store {
+			log_error("Could not determine a directory to store downloaded modules in.\n");
+			exit(1);
+		}
+
+		store := sprint("%/modules", plugin.options.store);
+		free(plugin.options.store);
+		plugin.options.store = store;
+
+		#if OS == .WINDOWS os_path := replace(store, "/", "\\",, temp);
+		else os_path := store;
+		is_dir, success := File_Utilities.is_directory(os_path);
+
+		if success {
+			if !is_dir
+				config_error(store, "is not a directory");
+		} else {
+			log("Could not find store a module store at '%'. Creating...\n", store, flags = .WARNING);
+			if !make_directory_if_it_does_not_exist(store, recursive = true)
+				config_error(store, "was not able to be created");
+		}
 	}
 
 	default_host, added := find_or_add(*plugin.options.host_map, .{});
@@ -364,18 +392,8 @@ message :: (p: *Metaprogram_Plugin, message: *Message) {
 		if failed_import.status != .NOT_FOUND return;
 
 		target_name := failed_import.target_module_name;
-		if !begins_with(target_name, "jamm") return;
-
-// 		if begins_with(target_name, "jamm://") {
-// 			if !plugin.options.host {
-// 				log_error("Could not determine a registry host URI for import '%'\n", target_name);
-// 				return;
-// 			}
-//
-// 			rest := advance(target_name, "jamm://".count);
-// 			target_name = tprint("jamm-%/modules%", plugin.options.host, rest);
-// 		}
-
+		if !begins_with_nocase(target_name, "jamm:") return;
+		base_uri := advance(target_name, "jamm:".count);
 		print("%\n", failed_import.*);
 
 		// TODO: Remap the import here
@@ -469,7 +487,6 @@ log_help :: (p: *Metaprogram_Plugin) {
 
 communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -> bool {
 	plugin: *Plugin = xx p;
-	original_key := key;
 
 	if plugin.stage >= .PREPARED {
 		log_error("JAMM cannot be configured once it has been prepared\n");
@@ -478,13 +495,13 @@ communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -> bo
 
 	invalid_key :: (reason: string = "Option is not recognized") #expand {
 		if plugin.is_communication_from_init then plugin.invalid_option_reason = reason;
-		else log_error("Invalid JAMM option '%': %\n", `original_key, reason);
+		else log_error("Invalid JAMM option '%': %\n", `key, reason);
 		`return false;
 	}
 
 	invalid_value :: (reason: string) #expand {
 		if plugin.is_communication_from_init then plugin.invalid_option_reason = reason;
-		else log_error("Invalid value for JAMM option '%': '%' %\n", `original_key, `value, reason);
+		else log_error("Invalid value for JAMM option '%': '%' %\n", `key, `value, reason);
 		`return false;
 	}
 
@@ -539,21 +556,20 @@ communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -> bo
 	}
 
     next :: () -> string #expand {
-		if `subkey_index >= `subkeys.count - 1 return "";
-		`subkey_index += 1;
+		if `subkey_index >= `subkeys.count return "";
+		defer `subkey_index += 1;
 		return `subkeys[`subkey_index];
     }
 
     next :: (desired: string) -> bool #expand {
-		if `subkey_index >= `subkeys.count - 1 return false;
-		if !equal_nocase(`subkeys[`subkey_index + 1], desired) return false;
+		if `subkey_index >= `subkeys.count return false;
+		if !equal_nocase(`subkeys[`subkey_index], desired) return false;
 		`subkey_index += 1;
 		return true;
     }
 
 	assert_last :: () #expand {
-		if `subkey_index != `subkeys.count - 1
-			invalid_key();
+		if `subkey_index < `subkeys.count invalid_key();
 	}
 
 	bool_option :: (value: string) -> bool #expand {
@@ -574,16 +590,10 @@ communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -> bo
 		invalid_value(message);
 	}
 
-	dir_option :: (value: string) -> string #expand {
-		valid, message := validate_dir(value);
-		if valid return copy_string(value);
-		invalid_value(message);
-	}
-
 	subkeys := split_key(key);
 	defer array_free(subkeys);
 
-	subkey_index := -1;
+	subkey_index := 0;
 	while subkey_index < subkeys.count {
 		if next("compatibility") {
 			if next("allow_wobbly_utf8") {
@@ -605,7 +615,7 @@ communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -> bo
 			if !!vendor != !!module invalid_key("Must specify both vendor.module or neither");
 
 	        host := uri_option(value);
-	        module_id := Module_Id.{ copy_string(vendor), copy_string(module) };
+	        module_id := Module_ID.{ copy_string(vendor), copy_string(module) };
 			entry, added := find_or_add(*plugin.options.host_map, module_id);
 			if !added {
 				free(module_id);
@@ -618,7 +628,7 @@ communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -> bo
 			assert_last();
 			if !vendor || !module invalid_key();
 
-	        module_id := Module_Id.{ copy_string(vendor), copy_string(module) };
+	        module_id := Module_ID.{ copy_string(vendor), copy_string(module) };
 			_, added := find_or_add(*plugin.options.publish, module_id);
 			if !added free(module_id);
 		} else if next("ssh") {
@@ -636,7 +646,7 @@ communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -> bo
 		} else if next("store") {
 			assert_last();
 			if plugin.options.store free(plugin.options.store);
-			plugin.options.store = dir_option(value);
+			plugin.options.store = copy_string(value);
         } else {
             invalid_key();
 		}
@@ -788,6 +798,8 @@ validate_uri :: (value: string) -> (valid: bool, message := "") {
 }
 
 validate_ssh_ref :: (value: string) -> (valid: bool, message := "") {
+	File_Utilities :: #import "File_Utilities";
+
 	if !value return true;
 
 	PATH_SEPARATOR :: #ifx OS == .WINDOWS then "\\" else "/";
@@ -800,7 +812,7 @@ validate_ssh_ref :: (value: string) -> (valid: bool, message := "") {
 			defer free(value);
 		}
 
-		if !file_exists(value)
+		if !File_Utilities.file_exists(value)
 			return false, "was not able to be opened";
 
 		return true;
@@ -826,19 +838,8 @@ validate_ssh_ref :: (value: string) -> (valid: bool, message := "") {
 	path := builder_to_string(*builder);
 	defer free(path);
 
-	if !file_exists(path)
+	if !File_Utilities.file_exists(path)
 		return false, tprint("was not able to be found or opened at '%'", path);
-
-	return true;
-}
-
-validate_dir :: (value: string) -> (valid: bool, message := "") {
-	if !value return true;
-
-	is_dir, success := is_directory(value);
-	if !success return false, "was not able to be opened";
-
-	if !is_dir return false, "is not a directory";
 
 	return true;
 }
@@ -972,24 +973,23 @@ validate_semver_identifiers :: (value: string, allow_leading := false) -> (valid
 	}
 }
 
-are_module_ids_equal :: (a: Module_Id, b: Module_Id) -> bool {
+are_module_ids_equal :: (a: Module_ID, b: Module_ID) -> bool {
 	return a.vendor == b.vendor && a.name == b.name;
 }
 
-hash_module_id :: (id: Module_Id) -> u32 {
+hash_module_id :: (id: Module_ID) -> u32 {
 	Hash :: #import "Hash";
 	return Hash.get_hash(id.vendor) ^ Hash.get_hash(id.name);
 }
 
-free :: (id: Module_Id) {
+free :: (id: Module_ID) {
 	free(id.vendor);
 	free(id.name);
 }
 
 trim_slash :: (path: string) -> string {
-	return ifx ends_with(path, "/")
-		then .{ path.count - 1, path.data }
-		else path;
+	if ends_with(path, "/") return .{ path.count - 1, path.data };
+	return path;
 }
 
 get_license_id :: (name: string) -> int {
@@ -1067,7 +1067,6 @@ License :: enum {
 #import "Basic";
 #import "Compiler";
 #import "File";
-#import "File_Utilities";
 #import "Hash_Table";
 #import "String";
 #import "System";
