@@ -59,14 +59,17 @@ Plugin :: struct {
 		// If true, just print help and exit.
 		print_help: bool;
 
+		// Default registry host path override.
+		host: string;
+
+		// Module store path override.
+		store: string;
+
 		// Per-host uri overrides.
 		host_map: Table(string, string);
 
 		// Per-host SSH key overrides.
 		ssh_map: Table(string, string);
-
-		// Module store path override.
-		store: string;
 
 		Publish :: struct {
 			// Target registry host override.
@@ -80,7 +83,7 @@ Plugin :: struct {
 		publish: Table(string, Publish);
 
 		Compatibility :: struct {
-			// Allows surrogate halves in your utf8 strings. But why?
+			// Allow surrogate halves in your utf8 strings. But why?
 			allow_wobbly_utf8: bool;
 
 			// Don't skip any expressions, something else will configure that.
@@ -94,6 +97,8 @@ Plugin :: struct {
 
 	modules: Table(*Message_Import, Module);
 }
+
+// TODO: Figure out how to make a declare :: (options: Declare_Options)
 
 import :: (options: Import_Options, $toplevel_scope := #caller_code) #expand {
 	make_import :: (options: Import_Options) -> string {
@@ -259,6 +264,11 @@ init :: (p: *Metaprogram_Plugin, options: [] string) -> bool {
 				cursor += 1;
 
 			case "-host";
+				ensure_options(2, "must be followed by an original host URI and a new host URI");
+				plugin.options.host = uri_option(options[cursor + 1]);
+				cursor += 2;
+
+			case "-map_host";
 				ensure_options(3, "must be followed by an original host URI and a new host URI");
 				from := uri_option(options[cursor + 1]);
 				to := uri_option(options[cursor + 2]);
@@ -321,13 +331,22 @@ before_intercept :: (p: *Metaprogram_Plugin, flags: *Intercept_Flags) {
 
 	has_publish := plugin.options.publish.count > 0;
 
-	// TODO: Add sensible defaults for store and publish host
-
 	if plugin.options.print_help {
 		if has_publish log(PUBLISH_HELP_STRING);
 		else log(HELP_STRING);
 		exit(0);
 	}
+
+	// TODO: Perform the validation here
+
+	if !plugin.options.host
+		plugin.options.host = get_default_host_path();
+
+	if !plugin.options.store
+		plugin.options.store = get_default_store_path();
+
+	for * plugin.options.publish
+		if !it.host then it.host = get_default_host_path();
 
 	if has_publish {
 		if !plugin.options.compatibility.do_not_skip_expressions
@@ -355,7 +374,23 @@ message :: (p: *Metaprogram_Plugin, message: *Message) {
 	if message.kind == {
 	case .FAILED_IMPORT;
 		failed_import: *Message_Failed_Import = xx message;
+		if failed_import.status != .NOT_FOUND return;
+
+		target_name := failed_import.target_module_name;
+		if !begins_with(target_name, "jamm") return;
+
+		if begins_with(target_name, "jamm://") {
+			if !plugin.options.host {
+				log_error("Could not determine a registry host URI for import '%'", target_name);
+				return;
+			}
+
+			rest := advance(target_name, "jamm://".count);
+			target_name = tprint("jamm-%/modules%", plugin.options.host, rest);
+		}
+
 		print("%\n", failed_import.*);
+
 		// TODO: Remap the import here
 		// TODO: Consider: adding a note to the import with the full version + build metadata
 
@@ -541,7 +576,12 @@ communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -> bo
 			invalid_key();
 		}
     } else {
-    	if consume(*key, "host.") {
+		if consume(*key, "help") {
+            plugin.options.print_help = bool_option(value);
+		} else if consume(*key, "host") {
+            if plugin.options.host free(plugin.options.host);
+            plugin.options.host = uri_option(value);
+    	} else if consume(*key, "map_host.") {
 			subkey := consume(*key,, temp);
 			if key invalid_key();
 
@@ -836,6 +876,83 @@ validate_semver_identifiers :: (value: string, allow_leading := false) -> (valid
 	return true;
 }
 
+#if OS == .WINDOWS {
+	#import "Windows";
+
+	get_default_config_path :: () -> string {
+		base := get_local_app_data_path(,, temp);
+		if !base return "";
+		return sprint("%/JAMM/Config", base);
+	}
+
+	get_default_host_path :: () -> string {
+		base := get_local_app_data_path(,, temp);
+		if !base return "";
+		return sprint("%/JAMM/Registry", base);
+	}
+
+	get_default_store_path :: () -> string {
+		base := get_local_app_data_path(,, temp);
+		if !base return "";
+		return sprint("%/JAMM/Store", base);
+	}
+
+	get_local_app_data_path :: () -> string {
+	    ole32    :: #library,system "ole32";
+	    shell32  :: #library,system "shell32";
+
+	    SHGetKnownFolderPath :: (nFolder: REFGUID, dwFlags: DWORD, hToken: HANDLE, pszPath: **u16) -> HRESULT #foreign shell32;
+	    CoTaskMemFree :: (data: *void) #foreign ole32;
+
+		FOLDERID_LocalAppData :: #run uid("F1B32785-6FBA-4FCF-9D55-7B8E7F157091");
+
+	    path_data: *u16;
+	    hr := SHGetKnownFolderPath(*FOLDERID_LocalAppData, KF_FLAG_CREATE, null, *path_data);
+	    defer CoTaskMemFree(path_data);
+	    if !SUCCEEDED(hr) return "";
+
+	    path := wide_to_utf8(path_data);
+		defer free(path);
+
+		return replace(path, "\\", "/");
+	}
+} else {
+	get_default_config_path :: () -> string {
+		base := get_env("XDG_CONFIG_HOME");
+		if base return tprint("%/jamm", trim_slash(base));
+		home := get_env("HOME");
+		assert(home);
+		return sprint("%/.config/jamm", trim_slash(home));
+	}
+
+	get_default_host_path :: () -> string {
+		base := get_env("XDG_DATA_HOME");
+		if base return tprint("%/jamm/registry", trim_slash(base));
+		home := get_env("HOME");
+		assert(home);
+		return sprint("%/.local/share/jamm/registry", trim_slash(home));
+	}
+
+	get_default_store_path :: () -> string {
+		base := get_env("XDG_CACHE_HOME");
+		if base return tprint("%/jamm/store", trim_slash(base));
+		home := get_env("HOME");
+		assert(home);
+		return sprint("%/.cache/jamm/store", trim_slash(home));
+	}
+
+	get_env :: (key: string) -> string {
+		value := getenv(key);
+		return ifx value then to_string(value);
+	}
+}
+
+trim_slash :: (path: string) {
+	return ifx ends_with(path.*, "/")
+		then .{ path.count - 1, path.data }
+		else path;
+}
+
 get_license_id :: (name: string) -> int {
 	assert(name.count <= 8, "License key too long!");
 	value: u64;
@@ -850,17 +967,20 @@ HELP_STRING :: #string DONE
 Resolve JAMM imports in the target program.
 
 Options
-	-help			Print this help message, or that of the first following
-					command.
-	-host FROM TO	Override the given FROM host URI to the given TO host URI.
-	-ssh URI KEY	Override the default SSH agent with a specific key for a
-					given host URI. See `+JAMM -help publish` for URI and KEY
-					constraints.
-	-store DIR		Override the default module store location. DIR must be a
-					valid directory on your computer.
+	-help				Print this help message, or that of the first following
+						command.
+	-host URI			Override the default host with the given host URI.
+	-map_host FROM TO	Replace any instances of the FROM host URI with TO.
+						This does not replace any host paths provided as
+						options to the plugin.
+	-ssh URI KEY		Override the default SSH agent with a specific key for
+						a given host URI. See `+JAMM -help publish` for URI and
+						KEY constraints.
+	-store DIR			Override the default module store location. DIR must be
+						a valid directory on your computer.
 
 Commands
-	publish			Publish your module to the module registry.
+	publish		Publish your module to the module registry.
 
 DONE
 
@@ -873,7 +993,7 @@ Publish your module to the module registry.
 This will fail if the module has already been published as a higher version, or
 if you have insufficient permissions.
 
-ptions:
+Options:
 	-host URI	Override the default target registry host. URI must be a valid
 				network or directory URI. This can be different than the source
 				registry!
