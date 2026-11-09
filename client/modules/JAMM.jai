@@ -55,6 +55,8 @@ Plugin :: struct {
 	is_communication_from_init: bool;
 	invalid_option_reason: string;
 
+	initial_working_directory: string;
+
 	stage: enum {
 		UNINITIALIZED;
 		INITIALIZED;
@@ -158,6 +160,10 @@ get_plugin :: () -> *Plugin {
 	plugin.shutdown           = shutdown;
 	plugin.log_help           = log_help;
 	plugin.communication_proc = communication_proc;
+
+	cwd := copy_string(get_working_directory());
+	#if OS == .WINDOWS then path_overwrite_separators(cwd, #char "/");
+	plugin.initial_working_directory = trim_slash(cwd);
 
 	return plugin;
 }
@@ -318,11 +324,9 @@ before_intercept :: (p: *Metaprogram_Plugin, flags: *Intercept_Flags) {
 		exit(0);
 	}
 
+	// Normalize the store path, and create it if it doesn't exist.
 	{
 		File_Utilities :: #import "File_Utilities";
-
-		#if OS == .WINDOWS
-			replace(*plugin.options.store, #char "\\", #char "/");
 
 		if !plugin.options.store
 			plugin.options.store = get_default_store_path();
@@ -332,23 +336,39 @@ before_intercept :: (p: *Metaprogram_Plugin, flags: *Intercept_Flags) {
 			exit(1);
 		}
 
-		store := sprint("%/modules", plugin.options.store);
-		free(plugin.options.store);
-		plugin.options.store = store;
+		store := trim_slash(plugin.options.store);
+		#if OS == .WINDOWS
+			path_overwrite_separators(store, #char "/");
 
-		#if OS == .WINDOWS os_path := replace(store, "/", "\\",, temp);
-		else os_path := store;
+		if !is_absolute_path(store)
+			store = tprint("%/%", plugin.initial_working_directory, store);
+		store = sprint("%/modules", store);
+
+		os_path := store;
+		#if OS == .WINDOWS {
+			os_path = copy_string(os_path,, temp);
+			path_overwrite_separators(os_path, #char "\\");
+		}
 		is_dir, success := File_Utilities.is_directory(os_path);
 
 		if success {
 			if !is_dir
-				config_error(store, "is not a directory");
+				config_error(store, "exists, but is not a directory");
 		} else {
-			log("Could not find store a module store at '%'. Creating...\n", store, flags = .WARNING);
+			log(
+				"Could not find a module store at '%'. Creating...\n",
+				plugin.options.store,
+				flags = .WARNING
+			);
 			if !make_directory_if_it_does_not_exist(store, recursive = true)
 				config_error(store, "was not able to be created");
 		}
+
+		free(plugin.options.store);
+		plugin.options.store = store;
 	}
+
+	// TODO: Move the other validation here too
 
 	default_host, added := find_or_add(*plugin.options.host_map, .{});
 	if added then default_host.* = get_default_host_path();
@@ -398,6 +418,8 @@ message :: (p: *Metaprogram_Plugin, message: *Message) {
 
 		// TODO: Remap the import here
 		// TODO: Consider: adding a note to the import with the full version + build metadata
+
+		// provide_import(plugin.workspace, failed_import, , );
 
 	case .IMPORT;
 		import: *Message_Import = xx message;
@@ -454,6 +476,8 @@ shutdown :: (p: *Metaprogram_Plugin) {
 	plugin: *Plugin = xx p;
 	assert(plugin.stage == .FINISHED);
 	plugin.stage = .SHUTDOWN;
+
+	free(plugin.initial_working_directory);
 
 	if plugin.options.store
 		free(plugin.options.store);
@@ -937,9 +961,8 @@ validate_semver_identifiers :: (value: string, allow_leading := false) -> (valid
 	    if !Windows.SUCCEEDED(hr) return "";
 
 	    path := Windows.wide_to_utf8(path_data);
-		defer free(path);
-
-		return replace(path, "\\", "/");
+		path_overwrite_separators(path, #char "/");
+		return path;
 	}
 } else {
 	get_default_config_path :: () -> string {
