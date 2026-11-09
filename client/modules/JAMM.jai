@@ -55,32 +55,23 @@ Plugin :: struct {
 		SHUTDOWN;
 	} = .UNINITIALIZED;
 
+	// All of these strings need to be allocated on the heap, since they will
+	// be freed from it during the shutdown phase.
 	Options :: struct {
 		// If true, just print help and exit.
 		print_help: bool;
 
-		// Default registry host path override.
-		host: string;
-
 		// Module store path override.
 		store: string;
 
-		// Per-host uri overrides.
+		// Per-moduler host uri overrides.
 		host_map: Table(string, string);
 
 		// Per-host SSH key overrides.
 		ssh_map: Table(string, string);
 
-		Publish :: struct {
-			// Target registry host override.
-			host: string;
-
-			// Target host SSH key override.
-			ssh_key: string;
-		}
-
-		// Publish commands, keyed on module name.
-		publish: Table(string, Publish);
+		// Modules to publish.
+		publish: Table(string, void);
 
 		Compatibility :: struct {
 			// Allow surrogate halves in your utf8 strings. But why?
@@ -209,115 +200,75 @@ init :: (p: *Metaprogram_Plugin, options: [] string) -> bool {
 	plugin: *Plugin = xx p;
 	assert(plugin.stage == .UNINITIALIZED);
 
-	invalid_option :: (reason := "is not a valid option") #expand {
-		full_reason := sprint("'%%' %", `command_prefix, `options[`cursor], reason);
-		defer free(full_reason);
-		log_error("Invalid arguments for JAMM: '%': %.\n%", `options, full_reason, `help_string);
+	report_invalid :: (reason: string) #expand {
+		log_error("Invalid JAMM options: '%'.\nOption '%' %\n", `options);
+		log_error("Option '%' %\n", `options[`cursor], reason);
 		`return false;
 	}
 
-	command_or_invalid :: () #expand {
-		if begins_with(`options[`cursor], "-") invalid_option();
-		`parse_mode = .NEXT_COMMAND;
-	}
-
 	ensure_options :: (count: int, reason: string) #expand {
-		if `cursor + count < `options.count
-			invalid_option(reason);
+		if `cursor + 1 + count <= `options.count then report_invalid(reason);
+		`defer `cursor += count;
 	}
 
-	uri_option :: (value: string) -> string #expand {
-		valid, message := validate_uri(value);
-		if valid return value;
-		invalid_option(message);
+	dispatch :: (key: string, value: string) #expand {
+		if `plugin.communication_proc(`plugin, key, value) return;
+		log_error(HELP_STRING);
+		`return false;
 	}
 
-	ssh_ref_option :: (value: string) -> string #expand {
-		valid, message := validate_ssh_ref(value);
-		if valid return value;
-		invalid_option(message);
+	escape_subkey :: (subkey: string) -> string {
+		inter := replace(options[cursor + 1], "\\", "\\\\",, temp);
+		return replace(inter, ".", "\\.",, temp);
 	}
-
-	dir_option :: (value: string) -> string #expand {
-		valid, message := validate_dir(value);
-		if valid return value;
-		invalid_option(message);
-	}
-
-	parse_mode: enum {
-		NONE;
-		NEXT_COMMAND;
-		PUBLISH;
-	} = .NONE;
-	command_prefix := "";
-	help_string := HELP_STRING;
-
-	publish_options: *Plugin.Options.Publish;
 
 	cursor := 0;
 	while cursor < options.count {
-		if #complete parse_mode == {
-		case .NONE;
-			if options[cursor] == {
-			case "-help";
-				plugin.options.print_help = true;
-				cursor += 1;
+		defer cursor += 1;
 
-			case "-host";
-				ensure_options(2, "must be followed by an original host URI and a new host URI");
-				plugin.options.host = uri_option(options[cursor + 1]);
-				cursor += 2;
+		if options[cursor] == {
+		case "-help";
+			dispatch("help", "true");
 
-			case "-map_host";
-				ensure_options(3, "must be followed by an original host URI and a new host URI");
-				from := uri_option(options[cursor + 1]);
-				to := uri_option(options[cursor + 2]);
-				table_set(*plugin.options.host_map, from, to);
-				cursor += 3;
+		case "-host";
+			ensure_options(1, "must be followed by a registry host URI");
+			dispatch("host", options[cursor + 1]);
 
-			case "-ssh";
-				ensure_options(3, "must be followed by a host URI and an SSH key reference");
-				host := uri_option(options[cursor + 1]);
-				key := ssh_ref_option(options[cursor + 2]);
-				table_set(*plugin.options.ssh_map, host, key);
-				cursor += 3;
-
-			case "-store";
-				ensure_options(2, "must be followed by a directory path");
-				plugin.options.store = dir_option(options[cursor + 1]);
-				cursor += 2;
-
-			case; command_or_invalid();
+		case "-host";
+			ensure_options(1, "must be followed by a host URI");
+			if cursor + 2 >= options.count || begins_with(options[cursor + 2], "-") {
+				dispatch("host", options[cursor + 1]);
+				continue;
 			}
 
-		case .NEXT_COMMAND;
-			if options[cursor] == {
-			case "publish";
-				ensure_options(2, "must be followed by a module name");
-				publish_options = find_or_add(*plugin.options.publish, options[cursor + 1]);
-				parse_mode = .PUBLISH;
-				cursor += 2;
+			ensure_options(2, "must be followed by a module name and a host URI");
+			key := ifx options[cursor + 1]
+				then tprint("host.%", escape_subkey(options[cursor + 1]));
+				else "host";
+			dispatch(key, options[cursor + 2]);
 
-			case; invalid_option("is not a valid command");
+		case "-publish";
+			ensure_options(1, "must be followed by a module name");
+			dispatch("publish", options[cursor + 1]);
+
+		case "-ssh";
+			ensure_options(1, "must be followed by an SSH key reference");
+			if cursor + 2 >= options.count || begins_with(options[cursor + 2], "-") {
+				dispatch("ssh", options[cursor + 1]);
+				continue;
 			}
 
-		case .PUBLISH;
-			command_prefix = "publish ";
-			help_string = PUBLISH_HELP_STRING;
+			ensure_options(2, "must be followed by a host URI and an SSH key reference");
+			key := ifx options[cursor + 1]
+				then tprint("ssh.%", escape_subkey(options[cursor + 1]))
+				else "ssh";
+			dispatch(key, options[cursor + 2]);
 
-			if options[cursor] == {
-			case "-host";
-				ensure_options(2, "must be followed by a host URI");
-				publish_options.host = uri_option(options[cursor + 1]);
-				cursor += 2;
+		case "-store";
+			ensure_options(1, "must be followed by a directory path");
+			dispatch("store", options[cursor + 1]);
 
-			case "-ssh";
-				ensure_options(2, "must be followed by an SSH key reference");
-				publish_options.ssh_key = ssh_ref_option(options[cursor + 1]);
-				cursor += 2;
-
-			case; command_or_invalid();
-			}
+		case; report_invalid("is not a valid option");
 		}
 	}
 
@@ -329,31 +280,31 @@ before_intercept :: (p: *Metaprogram_Plugin, flags: *Intercept_Flags) {
 	plugin: *Plugin = xx p;
 	assert(plugin.stage == .INITIALIZED);
 
-	has_publish := plugin.options.publish.count > 0;
-
 	if plugin.options.print_help {
-		if has_publish log(PUBLISH_HELP_STRING);
-		else log(HELP_STRING);
+		log(HELP_STRING);
 		exit(0);
 	}
 
 	// TODO: Perform the validation here
+	// Such as, default host cannot be empty, etc.
 
-	if !plugin.options.host
-		plugin.options.host = get_default_host_path();
+	default_host, added := find_or_add(*plugin.options.host_map, "");
+	if added then default_host.* = get_default_host_path();
+
+	removed, default_key_ref := table_remove(*plugin.options.ssh_map, "");
+	default_ssh_host := get_default_host_path();
+	default_ssh:, added = find_or_add(*plugin.options.ssh_map, default_ssh_host);
+	if !added free(default_ssh_host);
+	else default_ssh.* = default_key_ref;
 
 	if !plugin.options.store
 		plugin.options.store = get_default_store_path();
 
-	for * plugin.options.publish
-		if !it.host then it.host = get_default_host_path();
+	if !plugin.options.compatibility.do_not_skip_expressions
+		flags.* |= .SKIP_ALL;
 
-	if has_publish {
-		if !plugin.options.compatibility.do_not_skip_expressions
-			flags.* |= .SKIP_ALL;
-
+	if plugin.options.publish.count > 0
 		flags.* &= ~.SKIP_DECLARATIONS;
-	}
 
 	plugin.stage = .PREPARED;
 }
@@ -381,7 +332,7 @@ message :: (p: *Metaprogram_Plugin, message: *Message) {
 
 		if begins_with(target_name, "jamm://") {
 			if !plugin.options.host {
-				log_error("Could not determine a registry host URI for import '%'", target_name);
+				log_error("Could not determine a registry host URI for import '%'\n", target_name);
 				return;
 			}
 
@@ -450,8 +401,29 @@ shutdown :: (p: *Metaprogram_Plugin) {
 	assert(plugin.stage == .FINISHED);
 	plugin.stage = .SHUTDOWN;
 
+	if plugin.options.store
+		free(plugin.options.store);
+
+	for plugin.options.host_map {
+		remove it;
+		if it_index free(it_index);
+		if it free(it);
+	}
 	deinit(*plugin.options.host_map);
+
+	for plugin.options.ssh_map {
+		remove it;
+		if it_index free(it_index);
+		if it free(it);
+	}
 	deinit(*plugin.options.ssh_map);
+
+	for plugin.options.publish {
+		remove it;
+		if it_index free(it_index);
+	}
+	deinit(*plugin.options.publish);
+
 	deinit(*plugin.modules);
 }
 
@@ -464,19 +436,25 @@ communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -> bo
 	original_key := key;
 
 	if plugin.stage >= .PREPARED {
-		log_error("JAMM cannot be configured once it has been prepared");
+		log_error("JAMM cannot be configured once it has been prepared\n");
 		return false;
 	}
 
-	invalid_key :: (reason: string = "Unrecognized option") #expand {
-		log_error("Invalid JAMM communication key '%': %\n", `original_key, reason);
+	invalid_key :: (reason: string = "Option is not recognized") #expand {
+		log_error("Invalid JAMM option '%': %\n", `original_key, reason);
+		`return false;
+	}
+
+	invalid_value :: (reason: string) #expand {
+		log_error("Invalid value for JAMM option '%': '%' %\n", `original_key, `value, reason);
 		`return false;
 	}
 
 	consume :: (key: *string) -> string #expand {
 		i := 0;
-		subkey := copy_string(key.*);
+		subkey := copy_string(key.*,, temp);
 		is_escape := false;
+		has_more := false;
 
 		for key.* {
 			if is_escape {
@@ -486,18 +464,15 @@ communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -> bo
 				case #char ".";
 					subkey[i] = it;
 					i += 1;
-				case;
-					free(subkey);
-					invalid_key("Invalid escape (must be '\\\\' or '\\.')");
+				case; invalid_key("Invalid escape (must be '\\\\' or '\\.')");
 				}
 			} else {
 				if it == {
 				case #char "\\";
 					is_escape = true;
 				case #char ".";
-					subkey.count = i;
-					advance(key, i + 1);
-					return subkey;
+					has_more = true;
+					break;
 				case;
 					subkey[i] = it;
 					i += 1;
@@ -505,28 +480,24 @@ communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -> bo
 			}
 		}
 
-		if is_escape {
-			free(subkey);
+		if is_escape
 			invalid_key("Key cannot end with an unpaired escape ('\\')");
-		}
+
+		if i == 0
+			invalid_key("Key cannot have an empty component");
 
 		subkey.count = i;
-		advance(key, i);
+		advance(key, i + xx has_more);
 		return subkey;
 	}
 
     consume :: (key: *string, subkey: string) -> bool #expand {
 		expected_subkey := subkey;
-		found_subkey := consume(key,, temp);
+		found_subkey := consume(key);
 		if ends_with(expected_subkey, ".") expected_subkey.count -= 1;
 		else if key return false;
 		return equal_nocase(found_subkey, expected_subkey);
     }
-
-	invalid_value :: (reason: string) #expand {
-		log_error("Invalid value for JAMM communication key '%': '%' %\n", `original_key, `value, reason);
-		`return false;
-	}
 
 	bool_option :: (value: string) -> bool #expand {
 		if equal_nocase(value, "true") return true;
@@ -560,61 +531,53 @@ communication_proc :: (p: *Metaprogram_Plugin, key: string, value: string) -> bo
         } else {
             invalid_key();
         }
-    } else if consume(*key, "publish.") {
-		module := consume(*key);
+    } else if consume(*key, "help") {
+        plugin.options.print_help = bool_option(value);
+	} else if consume(*key, "host") {
+        host := uri_option(value);
+		entry, added := find_or_add(*plugin.options.host_map, "");
+		if !added free(entry.*);
+		entry.* = host;
+	} else if consume(*key, "host.") {
+		subkey := consume(*key);
+		if key invalid_key();
 
-		publish_options, added := find_or_add(*plugin.options.publish, module);
-		if !added free(module);
-
-		if consume(*key, "host") {
-			if publish_options.host free(publish_options.host);
-			publish_options.host = uri_option(value);
-		} else if consume(*key, "ssh") {
-			if publish_options.ssh_key free(publish_options.ssh_key);
-			publish_options.ssh_key = ssh_ref_option(value);
-		} else {
-			invalid_key();
-		}
-    } else {
-		if consume(*key, "help") {
-            plugin.options.print_help = bool_option(value);
-		} else if consume(*key, "host") {
-            if plugin.options.host free(plugin.options.host);
-            plugin.options.host = uri_option(value);
-    	} else if consume(*key, "map_host.") {
-			subkey := consume(*key,, temp);
-			if key invalid_key();
-
-            host_to := uri_option(value);
-            defer free(host_to);
-            host_from := uri_option(subkey);
-
-    		entry, added := find_or_add(*plugin.options.host_map, host_from);
-    		if !added {
-                free(host_from);
-                free(entry.*);
-            }
-    		entry.* = copy_string(host_to);
-    	} else if consume(*key, "ssh.") {
-			subkey := consume(*key);
-			if key invalid_key();
-
-            ssh_key := ssh_ref_option(value);
-            defer free(ssh_key);
-            ssh_host := uri_option(subkey);
-
-            entry, added := find_or_add(*plugin.options.ssh_map, ssh_host);
-            if !added {
-                free(ssh_host);
-                free(entry.*);
-            }
-            entry.* = copy_string(ssh_key);
-        } else if consume(*key, "store") {
-            if plugin.options.store free(plugin.options.store);
-            plugin.options.store = dir_option(value);
-        } else {
-            invalid_key();
+        host := uri_option(value,, temp);
+        module := copy_string(subkey);
+		entry, added := find_or_add(*plugin.options.host_map, module);
+		if !added {
+            free(module);
+            free(entry.*);
         }
+		entry.* = copy_string(host);
+	} else if consume(*key, "publish.") {
+		module := consume(*key);
+		if key invalid_key();
+
+		_, added := find_or_add(*plugin.options.publish, module);
+		if !added free(module);
+	} else if consume(*key, "ssh") {
+        ssh_key := ssh_ref_option(value);
+        entry, added := find_or_add(*plugin.options.ssh_map, "");
+        if !added free(entry.*);
+        entry.* = ssh_key;
+	} else if consume(*key, "ssh.") {
+		subkey := consume(*key);
+		if key invalid_key();
+
+        ssh_key := ssh_ref_option(value,, temp);
+        ssh_host := uri_option(subkey);
+        entry, added := find_or_add(*plugin.options.ssh_map, ssh_host);
+        if !added {
+            free(ssh_host);
+            free(entry.*);
+        }
+        entry.* = copy_string(ssh_key);
+    } else if consume(*key, "store") {
+        if plugin.options.store free(plugin.options.store);
+        plugin.options.store = dir_option(value);
+    } else {
+        invalid_key();
     }
 
 	return true;
@@ -796,7 +759,7 @@ validate_ssh_ref :: (value: string) -> (valid: bool, message := "") {
 
 	append(*builder, home);
 	if (home[home.count - 1] != PATH_SEPARATOR) append(*builder, PATH_SEPARATOR);
-	print_to_builder(*builder, ".ssh%%.pub", PATH_SEPARATOR, value);
+	print_to_builder(*builder, ".ssh%%", PATH_SEPARATOR, value);
 
 	path := builder_to_string(*builder);
 	defer free(path);
@@ -962,44 +925,30 @@ get_license_id :: (name: string) -> int {
 
 HELP_STRING :: #string DONE
 
-+JAMM [..OPTIONS] [ .. COMMAND [..] ]
++JAMM [..OPTIONS]
 
 Resolve JAMM imports in the target program.
 
 Options
-	-help				Print this help message, or that of the first following
-						command.
-	-host URI			Override the default host with the given host URI.
-	-map_host FROM TO	Replace any instances of the FROM host URI with TO.
-						This does not replace any host paths provided as
-						options to the plugin.
-	-ssh URI KEY		Override the default SSH agent with a specific key for
-						a given host URI. See `+JAMM -help publish` for URI and
-						KEY constraints.
+	-help				Print this help message.
+	-host URI
+	-host MODULE TO		Override the default registry host for MODULE with TO.
+				 		Omitting MODULE, or inserting an empty option '""',
+						will override the default host for any modules not
+						specifying a host explicitly.
+	-publish MODULE		Publish the specified module to its registry. It needs
+						to be imported and declared somewhere in the target
+						program. This will fail if the module has already been
+						published as a higher version, or if you have
+						insufficient permissions.
+	-ssh KEY
+	-ssh HOST KEY		Override the default SSH agent with a specific key for
+						a given host URI. Omitting HOST, or inserting an empty
+						option '""', will override for the default host. KEY
+						can be the name of a key in ~/.ssh, or a path to the
+						key to use.
 	-store DIR			Override the default module store location. DIR must be
 						a valid directory on your computer.
-
-Commands
-	publish		Publish your module to the module registry.
-
-DONE
-
-PUBLISH_HELP_STRING :: #string DONE
-
-+JAMM [..] publish [..OPTIONS]
-
-Publish your module to the module registry.
-
-This will fail if the module has already been published as a higher version, or
-if you have insufficient permissions.
-
-Options:
-	-host URI	Override the default target registry host. URI must be a valid
-				network or directory URI. This can be different than the source
-				registry!
-	-ssh KEY	Override the default SSH agent with a specific key. KEY must be
-				a valid public key name in ~/.ssh, or a relative or absolute
-				path to a public key.
 
 DONE
 
