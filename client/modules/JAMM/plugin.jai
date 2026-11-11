@@ -1,5 +1,25 @@
 #scope_export
 
+Plugin :: struct {
+	#as using base: Metaprogram_Plugin;
+
+	stage: enum {
+		UNINITIALIZED;
+		INITIALIZED;
+		PREPARED;
+		EXECUTING;
+		FINISHED;
+		SHUTDOWN;
+	} = .UNINITIALIZED;
+
+	options: Options;
+
+	initial_working_directory: string;
+    store_modules_path: string;
+
+	modules: Table(*Message_Import, Module);
+}
+
 get_plugin :: () -> *Plugin {
 	plugin := New(Plugin);
 
@@ -12,9 +32,7 @@ get_plugin :: () -> *Plugin {
 	plugin.log_help           = log_help;
 	plugin.communication_proc = communication_proc;
 
-	cwd := copy_string(get_working_directory());
-	#if OS == .WINDOWS then path_overwrite_separators(cwd, #char "/");
-	plugin.initial_working_directory = trim_slash(cwd);
+	plugin.initial_working_directory = get_normalized_cwd();
 
 	return plugin;
 }
@@ -127,59 +145,21 @@ before_intercept :: (p: *Metaprogram_Plugin, flags: *Intercept_Flags) {
 	plugin: *Plugin = xx p;
 	assert(plugin.stage == .INITIALIZED);
 
-	config_error :: (value: string, reason: string) {
-		log_error("Invalid JAMM configuration: '%' %.\n", value, reason);
-		exit(1);
-	}
-
 	if plugin.options.print_help {
 		log(HELP_STRING);
 		exit(0);
 	}
 
 	// Normalize the store path, and create it if it doesn't exist.
-	{
-		File_Utilities :: #import "File_Utilities";
-
-		if !plugin.options.store
-			plugin.options.store = get_default_store_path();
-
-		if !plugin.options.store {
-			log_error("Could not determine a directory to store downloaded modules in.\n");
-			exit(1);
-		}
-
-		store := trim_slash(plugin.options.store);
-		#if OS == .WINDOWS
-			path_overwrite_separators(store, #char "/");
-
-		if !is_absolute_path(store)
-			store = tprint("%/%", plugin.initial_working_directory, store);
-		store = sprint("%/modules", store);
-
-		os_path := store;
-		#if OS == .WINDOWS {
-			os_path = copy_string(os_path,, temp);
-			path_overwrite_separators(os_path, #char "\\");
-		}
-		is_dir, success := File_Utilities.is_directory(os_path);
-
-		if success {
-			if !is_dir
-				config_error(store, "exists, but is not a directory");
-		} else {
-			log(
-				"Could not find a module store at '%'. Creating...\n",
-				plugin.options.store,
-				flags = .WARNING
-			);
-			if !make_directory_if_it_does_not_exist(store, recursive = true)
-				config_error(store, "was not able to be created");
-		}
-
-		free(plugin.options.store);
-		plugin.options.store = store;
-	}
+    success, store_modules_path, message := initialize_store(
+        plugin.options.store,
+        plugin.initial_working_directory
+    );
+    plugin.store_modules_path = store_modules_path;
+    if !success {
+        log_error("Failed to initialize module store: '%' %.\n", store_modules_path, message);
+        exit(1);
+    }
 
 	// TODO: Move the other validation here too
 
@@ -291,8 +271,11 @@ shutdown :: (p: *Metaprogram_Plugin) {
 	plugin.stage = .SHUTDOWN;
 
 	free(plugin.initial_working_directory);
+	free(plugin.store_modules_path);
+
 	free_options(plugin.options);
-	deinit(*plugin.modules);
+
+    deinit(*plugin.modules);
 }
 
 log_help :: (p: *Metaprogram_Plugin) {
@@ -343,6 +326,5 @@ DONE
 
 #import "Basic";
 #import "Compiler";
-#import "File";
 #import "Hash_Table";
 #import "String";

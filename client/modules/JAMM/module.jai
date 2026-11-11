@@ -48,29 +48,6 @@ Module :: struct {
 	declaration: *Code_Node;
 }
 
-Plugin :: struct {
-	#as using base: Metaprogram_Plugin;
-
-	// Cross-communication between init() and communication_proc()
-	is_communication_from_init: bool;
-	invalid_option_reason: string;
-
-	initial_working_directory: string;
-
-	stage: enum {
-		UNINITIALIZED;
-		INITIALIZED;
-		PREPARED;
-		EXECUTING;
-		FINISHED;
-		SHUTDOWN;
-	} = .UNINITIALIZED;
-
-	options: Options;
-
-	modules: Table(*Message_Import, Module);
-}
-
 // TODO: Figure out how to make a declare :: (options: Declare_Options)
 
 import :: (options: Import_Options, $toplevel_scope := #caller_code) #expand {
@@ -453,6 +430,12 @@ trim_slash :: (path: string) -> string {
 	return path;
 }
 
+get_normalized_cwd :: () -> string {
+	cwd := copy_string(get_working_directory());
+	#if OS == .WINDOWS then path_overwrite_separators(cwd, #char "/");
+	return trim_slash(cwd);
+}
+
 get_license_id :: (name: string) -> int {
 	assert(name.count <= 8, "License key too long!");
 	value: u64;
@@ -503,5 +486,6 @@ License :: enum {
 #import "String";
 #import "System";
 
+#load "engine.jai";
 #load "options.jai";
 #load "plugin.jai";
