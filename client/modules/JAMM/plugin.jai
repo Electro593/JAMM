@@ -14,8 +14,7 @@ Plugin :: struct {
 
 	options: Options;
 
-	initial_working_directory: string;
-    store_modules_path: string;
+    engine: Engine;
 
 	modules: Table(*Message_Import, Module);
 }
@@ -32,7 +31,7 @@ get_plugin :: () -> *Plugin {
 	plugin.log_help           = log_help;
 	plugin.communication_proc = communication_proc;
 
-	plugin.initial_working_directory = get_normalized_cwd();
+	plugin.engine.working_directory = get_normalized_cwd();
 
 	return plugin;
 }
@@ -90,7 +89,7 @@ init :: (p: *Metaprogram_Plugin, options: [] string) -> bool {
 	plugin: *Plugin = xx p;
 	assert(plugin.stage == .UNINITIALIZED);
 
-    if !begins_with(options[0], "-") {
+    if options && !begins_with(options[0], "-") {
 		log_error("Invalid JAMM options %: Options must start with a hyphen.\n", options);
         log_error(HELP_STRING);
         return false;
@@ -120,10 +119,7 @@ init :: (p: *Metaprogram_Plugin, options: [] string) -> bool {
         key_parts := parts;
         value := "";
 
-        // HACK: I would much rather the vendor/module be passed as the value,
-        // but imposing escape semantics on the value just to delimit them
-        // sounds like a pain.
-        if parts.count > 1 && parts[0] != "publish" {
+        if parts.count > 1 {
             key_parts.count -= 1;
             value = parts[parts.count - 1];
         }
@@ -150,16 +146,7 @@ before_intercept :: (p: *Metaprogram_Plugin, flags: *Intercept_Flags) {
 		exit(0);
 	}
 
-	// Normalize the store path, and create it if it doesn't exist.
-    success, store_modules_path, message := initialize_store(
-        plugin.options.store,
-        plugin.initial_working_directory
-    );
-    plugin.store_modules_path = store_modules_path;
-    if !success {
-        log_error("Failed to initialize module store: '%' %.\n", store_modules_path, message);
-        exit(1);
-    }
+    initialize_engine(*plugin.engine, plugin.options);
 
 	// TODO: Move the other validation here too
 
@@ -171,17 +158,8 @@ before_intercept :: (p: *Metaprogram_Plugin, flags: *Intercept_Flags) {
 	for * plugin.options.host_map
 		if !it then it.* = copy_string(default_host.*);
 
-	removed, default_key_ref := table_remove(*plugin.options.ssh_map, "");
-	default_ssh_host := get_default_host_path();
-	default_ssh:, added = find_or_add(*plugin.options.ssh_map, default_ssh_host);
-	if !added free(default_ssh_host);
-	else default_ssh.* = default_key_ref;
-
 	if !plugin.options.compatibility.do_not_skip_expressions
 		flags.* |= .SKIP_ALL;
-
-	if plugin.options.publish.count > 0
-		flags.* &= ~.SKIP_DECLARATIONS;
 
 	plugin.stage = .PREPARED;
 }
@@ -204,15 +182,8 @@ message :: (p: *Metaprogram_Plugin, message: *Message) {
 		failed_import: *Message_Failed_Import = xx message;
 		if failed_import.status != .NOT_FOUND return;
 
-		target_name := failed_import.target_module_name;
-		if !begins_with_nocase(target_name, "jamm:") return;
-		base_uri := advance(target_name, "jamm:".count);
-		print("%\n", failed_import.*);
-
-		// TODO: Remap the import here
-		// TODO: Consider: adding a note to the import with the full version + build metadata
-
-		// provide_import(plugin.workspace, failed_import, , );
+		success, remapped := remap_import(*plugin.engine, failed_import.target_module_name);
+		if success provide_import(plugin.workspace, failed_import, .PATH_TO_FILE, remapped);
 
 	case .IMPORT;
 		import: *Message_Import = xx message;
@@ -270,9 +241,7 @@ shutdown :: (p: *Metaprogram_Plugin) {
 	assert(plugin.stage == .FINISHED);
 	plugin.stage = .SHUTDOWN;
 
-	free(plugin.initial_working_directory);
-	free(plugin.store_modules_path);
-
+    deinit_engine(*plugin.engine);
 	free_options(plugin.options);
 
     deinit(*plugin.modules);
@@ -305,20 +274,12 @@ Options
 	-help						Print this help message.
 	-host HOST					Override the default registry host.
 	-host VENDOR MODULE HOST	Override the registry host for a given module.
-	-publish VENDOR MODULE		Publish the specified module to its registry.
-								It needs to be imported and declared somewhere
-								in the target program. This will fail if the
-								module has already been published as a higher
-								version, or if you don't have permission.
-	-ssh KEY					Override the default SSH key.
-	-ssh HOST KEY				Override the default SSH key for a given host.
 	-store STORE				Override the default module store location.
 
 Option Types
 	HOST		A valid URI to a module registry host. For now, only the 'file'
 				scheme is supported.
 	MODULE		A module name.
-	SSHREF		The name of an SSH private key in ~/.ssh, or a path to one.
 	STORE		A directory path to a module store.
 	VENDOR		A module vendor name.
 

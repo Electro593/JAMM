@@ -9,7 +9,7 @@ Declare_Options :: struct {
 }
 
 Import_Options :: struct {
-	vendor: string;
+    vendor: string;
 	name: string;
 	version: Version_Constraint;
 
@@ -51,13 +51,7 @@ Module :: struct {
 // TODO: Figure out how to make a declare :: (options: Declare_Options)
 
 import :: (options: Import_Options, $toplevel_scope := #caller_code) #expand {
-	make_import :: (options: Import_Options) -> string {
-		uri := make_module_uri(options);
-		defer free(uri);
-		return tprint("#import \"%\";", uri);
-	}
-
-	#insert,scope(toplevel_scope) #run make_import(options);
+	#insert,scope(toplevel_scope) #run tprint("#import \"%\";", make_module_uri(options,, temp));
 }
 
 make_module_uri :: (options: Import_Options) -> string {
@@ -81,6 +75,7 @@ make_module_uri :: (options: Import_Options) -> string {
 	builder: String_Builder;
 	init_string_builder(*builder);
 
+    // TODO: Host needs to be escaped
 	print_to_builder(*builder, "jamm:%/%/%", host, vendor, name);
 	print_to_builder(*builder, "/%.%.%", version.major, version.minor, version.patch);
 
@@ -239,53 +234,6 @@ validate_uri :: (value: string) -> (valid: bool, message := "") {
 	// TODO: Implement uri validation
 
 	return false, "";
-}
-
-validate_ssh_ref :: (value: string) -> (valid: bool, message := "") {
-	File_Utilities :: #import "File_Utilities";
-
-	if !value return true;
-
-	PATH_SEPARATOR :: #ifx OS == .WINDOWS then "\\" else "/";
-
-	is_path := contains(value, "/");
-	#if OS == .WINDOWS then is_path |= contains(value, "\\");
-	if is_path {
-		#if OS == .WINDOWS {
-			value := replace(value, "/", "\\");
-			defer free(value);
-		}
-
-		if !File_Utilities.file_exists(value)
-			return false, "was not able to be opened";
-
-		return true;
-	}
-
-	home, success := get_home_directory();
-	if !success {
-		username:, success = get_username();
-		if success
-			home, success = get_home_directory(username);
-	}
-
-	if !success
-		return false, "was not able to find the user's home directory";
-
-	builder: String_Builder;
-	init_string_builder(*builder);
-
-	append(*builder, home);
-	if (home[home.count - 1] != PATH_SEPARATOR) append(*builder, PATH_SEPARATOR);
-	print_to_builder(*builder, ".ssh%%", PATH_SEPARATOR, value);
-
-	path := builder_to_string(*builder);
-	defer free(path);
-
-	if !File_Utilities.file_exists(path)
-		return false, tprint("was not able to be found or opened at '%'", path);
-
-	return true;
 }
 
 validate_version :: (using value: Version) -> (valid: bool, message := "") {

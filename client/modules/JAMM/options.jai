@@ -13,12 +13,6 @@ Options :: struct {
 	// FUTURE: Allow vendor to be omitted, use config if available
 	host_map: Table(Module_ID, string, hash_module_id, are_module_ids_equal);
 
-	// Per-host SSH key overrides.
-	ssh_map: Table(string, string);
-
-	// Modules to publish.
-	publish: Table(Module_ID, void, hash_module_id, are_module_ids_equal);
-
 	Compatibility :: struct {
 		// Allow surrogate halves in your utf8 strings. But why?
 		allow_wobbly_utf8: bool;
@@ -106,36 +100,6 @@ apply_option :: (using options: *Options, key: string, value: string) -> (succes
             );
         }
         return true;
-	} else if subkey_is(0, "publish") {
-		vendor := subkey_at(1);
-		module := subkey_at(2);
-
-		if !(subkeys.count == 3 && vendor && module)
-            return false, "must have form 'publish.<vendor>.<module>'";
-
-        if !table_contains(*options.publish, .{ vendor, module }) {
-            _void: void;
-            table_add(
-                *options.publish,
-                .{ copy_string(vendor), copy_string(module) },
-                _void
-            );
-        }
-        return true;
-	} else if subkey_is(0, "ssh") {
-		host := subkey_at(1);
-
-		if !(subkeys.count == 1) && !(subkeys.count == 2 && host)
-            return false, "must have form 'ssh' or 'ssh.<host>'";
-
-        prev_host := table_find_pointer(*options.ssh_map, host);
-        if prev_host {
-            free(prev_host.*);
-            prev_host.* = copy_string(value);
-        } else {
-            table_add(*options.ssh_map, copy_string(host), copy_string(value));
-        }
-        return true;
 	} else if subkey_is(0, "store") {
 		if options.store free(options.store);
 		options.store = copy_string(value);
@@ -155,20 +119,6 @@ free_options :: (using options: Options) {
 		if it free(it);
 	}
 	deinit(*host_map);
-
-	for ssh_map {
-		remove it;
-		if it_index free(it_index);
-		if it free(it);
-	}
-	deinit(*ssh_map);
-
-	for publish {
-		remove it;
-		if it_index.vendor free(it_index.vendor);
-		if it_index.module free(it_index.module);
-	}
-	deinit(*publish);
 }
 
 #scope_file

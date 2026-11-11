@@ -1,9 +1,39 @@
 #scope_module
 
-// modules_path is allocated regardless of success
+Engine :: struct {
+    working_directory: string;
+
+    store_modules_path: string;
+}
+
+initialize_engine :: (using engine: *Engine, options: Options) {
+    if working_directory then working_directory = get_normalized_cwd();
+    working_directory = trim_slash(working_directory);
+
+    success, store_modules_path=, message := initialize_store(
+        options.store,
+        working_directory
+    );
+    if !success {
+        log_error("Failed to initialize module store: '%' %.\n", store_modules_path, message);
+        exit(1);
+    }
+}
+
+remap_import :: (using engine: *Engine, import: string) -> (success: bool, remapped := "") {
+    return false, "";
+}
+
+deinit_engine :: (using engine: *Engine) {
+    free(working_directory);
+    free(store_modules_path);
+}
+
+#scope_file
+
 initialize_store :: (
     store: string,
-    cwd := ""
+    cwd: string
 ) -> (success: bool, modules_path: string, message := "") {
 	modules_path := trim_slash(store);
 
@@ -18,10 +48,8 @@ initialize_store :: (
 	#if OS == .WINDOWS
 		path_overwrite_separators(modules_path, #char "/");
 
-	if !is_absolute_path(modules_path) {
-        working_directory := ifx cwd then trim_slash(cwd) else get_normalized_cwd(,, temp);
-		modules_path = tprint("%/%", working_directory, modules_path);
-    }
+	if !is_absolute_path(modules_path)
+		modules_path = tprint("%/%", cwd, modules_path);
 
 	modules_path = sprint("%/modules", modules_path);
 
@@ -50,8 +78,6 @@ initialize_store :: (
 
     return true, modules_path;
 }
-
-#scope_file
 
 #import "File";
 #import "File_Utilities";
